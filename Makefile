@@ -13,8 +13,9 @@ reset  = \033[0m
 .PHONY: help
 help:
 	@echo -e "$(green)Dev$(reset)"
-	@echo "  make setup     Install dependencies"
-	@echo "  make build     Compile TypeScript"
+	@echo "  make setup            Install dependencies"
+	@echo "  make build            Compile TypeScript"
+	@echo "  make coordinator-dev  Start coordinator in dev mode"
 	@echo "  make check     Biome lint + format check"
 	@echo "  make format    Biome format (write)"
 	@echo "  make test      Run tests"
@@ -28,6 +29,10 @@ setup:
 .PHONY: build
 build:
 	$(RUN) build
+
+.PHONY: coordinator-dev
+coordinator-dev:
+	$(RUN) coordinator:dev
 
 .PHONY: check
 check:
@@ -53,6 +58,7 @@ precommit-checks:
 	@set -euo pipefail; \
 	echo -e "$(gray)Running pre-commit checks...$(reset)"; \
 	$(MAKE) check; \
+	$(MAKE) build; \
 	$(MAKE) test; \
 	echo -e "$(green)✓ Pre-commit checks passed$(reset)"
 

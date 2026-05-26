@@ -9,7 +9,8 @@
 		"build": "tsc",
 		"check": "biome check .",
 		"format": "biome format --write .",
-		"test": "echo \"No tests yet\" && exit 0"
+		"test": "echo \"No tests yet\" && exit 0",
+		"coordinator:dev": "ts-node src/coordinator/index.ts"
 	},
 	"keywords": [],
 	"author": "",
