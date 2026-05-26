@@ -1,0 +1,36 @@
+{
+	"name": "assign",
+	"version": "1.0.0",
+	"main": "index.js",
+	"directories": {
+		"doc": "docs"
+	},
+	"scripts": {
+		"build": "tsc",
+		"check": "biome check .",
+		"format": "biome format --write .",
+		"test": "echo \"No tests yet\" && exit 0"
+	},
+	"keywords": [],
+	"author": "",
+	"license": "ISC",
+	"description": "",
+	"dependencies": {
+		"express": "^5.2.1",
+		"pg": "^8.21.0",
+		"reflect-metadata": "^0.2.2",
+		"typeorm": "^1.0.0",
+		"uuid": "^14.0.0",
+		"ws": "^8.21.0"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.4.15",
+		"@types/express": "^5.0.6",
+		"@types/node": "^25.9.1",
+		"@types/pg": "^8.20.0",
+		"@types/uuid": "^10.0.0",
+		"@types/ws": "^8.18.1",
+		"ts-node": "^10.9.2",
+		"typescript": "^6.0.3"
+	}
+}
