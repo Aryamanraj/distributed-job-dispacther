@@ -1,4 +1,5 @@
 import express from "express";
+import { createJobsRouter } from "./routes/jobs";
 
 export function createServer() {
 	const app = express();
@@ -8,6 +9,8 @@ export function createServer() {
 	app.get("/health", (_req, res) => {
 		res.json({ status: "ok" });
 	});
+
+	app.use("/jobs", createJobsRouter());
 
 	return app;
 }

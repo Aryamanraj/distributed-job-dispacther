@@ -46,6 +46,7 @@ check:
 .PHONY: format
 format:
 	$(RUN) format
+	npx biome check --write .
 
 .PHONY: test
 test:
