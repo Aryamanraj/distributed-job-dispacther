@@ -1,8 +1,11 @@
 import "dotenv/config";
+import { createServer as createHttpServer } from "node:http";
+import { WebSocketServer } from "ws";
 import { logger } from "../util/logger";
 import { config } from "./config";
 import { AppDataSource } from "./db/data-source";
 import { createServer } from "./server";
+import { WorkerHubService } from "./services/worker-hub.service";
 
 async function main() {
 	logger.info("Connecting to database");
@@ -10,12 +13,28 @@ async function main() {
 	logger.info("Database connected");
 
 	const app = createServer();
+	const httpServer = createHttpServer(app);
 
-	app.listen(config.port, () => {
+	const wss = new WebSocketServer({ noServer: true });
+	const workerHub = new WorkerHubService(wss);
+
+	httpServer.on("upgrade", (req, socket, head) => {
+		wss.handleUpgrade(req, socket, head, (ws) => {
+			wss.emit("connection", ws, req);
+		});
+	});
+
+	httpServer.listen(config.port, () => {
 		logger.info(
 			{ port: config.port, coordinatorId: config.coordinatorId },
 			"Coordinator listening",
 		);
+	});
+
+	// Graceful shutdown
+	process.on("SIGTERM", () => {
+		workerHub.stop();
+		httpServer.close(() => process.exit(0));
 	});
 }
 
