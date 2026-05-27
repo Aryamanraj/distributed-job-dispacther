@@ -16,6 +16,7 @@ help:
 	@echo "  make setup            Install dependencies"
 	@echo "  make build            Compile TypeScript"
 	@echo "  make coordinator-dev  Start coordinator in dev mode"
+	@echo "  make migrate          Run pending DB migrations"
 	@echo "  make check     Biome lint + format check"
 	@echo "  make format    Biome format (write)"
 	@echo "  make test      Run tests"
@@ -33,6 +34,10 @@ build:
 .PHONY: coordinator-dev
 coordinator-dev:
 	$(RUN) coordinator:dev
+
+.PHONY: migrate
+migrate:
+	$(RUN) migrate
 
 .PHONY: check
 check:
