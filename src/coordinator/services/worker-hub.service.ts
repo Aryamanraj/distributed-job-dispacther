@@ -1,12 +1,10 @@
+import type { EntityManager } from "typeorm";
 import WebSocket, { type WebSocketServer } from "ws";
 import { JOB_STATUS_ENUM } from "../../shared/job-status";
 import type { CoordToWorkerMsg, WorkerToCoordMsg } from "../../shared/protocol";
 import { logger } from "../../util/logger";
 import { AppDataSource } from "../db/data-source";
-import { Job } from "../db/entities/job.entity";
-import { JobEvent } from "../db/entities/job-event.entity";
-import { Lease } from "../db/entities/lease.entity";
-import { WorkerReg } from "../db/entities/worker-reg.entity";
+import { jobEventRepo, jobRepo, leaseRepo, workerRegRepo } from "../db/repo";
 
 interface WorkerState {
 	ws: WebSocket;
@@ -89,7 +87,7 @@ export class WorkerHubService {
 		const { workerId, concurrencyLimit } = msg;
 		setId(workerId);
 
-		await AppDataSource.getRepository(WorkerReg).upsert(
+		await workerRegRepo.upsert(
 			{
 				WorkerID: workerId,
 				ConcurrencyLimit: concurrencyLimit,
@@ -128,39 +126,33 @@ export class WorkerHubService {
 			return;
 		}
 
-		const lease = await AppDataSource.getRepository(Lease).findOne({
-			where: { JobID: msg.jobId, WorkerID: state.workerId },
-		});
+		const lease = await leaseRepo.get(
+			{ where: { JobID: msg.jobId, WorkerID: state.workerId } },
+			false,
+		);
 
 		// No lease = expired. Token mismatch = fencing violation. Either way: discard.
-		if (!lease || String(lease.Token) !== String(msg.token)) {
+		if (!lease.data || String(lease.data.Token) !== String(msg.token)) {
 			logger.warn(
-				{ jobId: msg.jobId, workerId: state.workerId, hasLease: !!lease },
+				{ jobId: msg.jobId, workerId: state.workerId, hasLease: !!lease.data },
 				"Lease missing or token mismatch — discarding result",
 			);
 			state.inFlight = Math.max(0, state.inFlight - 1);
 			return;
 		}
 
-		await AppDataSource.transaction(async (em) => {
-			await em.delete(Lease, { JobID: msg.jobId });
-			await em
-				.createQueryBuilder()
-				.update(Job)
-				.set({
+		await AppDataSource.transaction(async (em: EntityManager) => {
+			await leaseRepo.delete({ JobID: msg.jobId }, em);
+			await jobRepo.update(
+				{ JobID: msg.jobId },
+				{
 					Status: JOB_STATUS_ENUM.COMPLETED,
 					Result: msg.result,
 					UpdatedAt: new Date(),
-				})
-				.where('"JobID" = :id AND "Status" != :done', {
-					id: msg.jobId,
-					done: JOB_STATUS_ENUM.COMPLETED,
-				})
-				.execute();
-			await em.save(
-				JobEvent,
-				em.create(JobEvent, { JobID: msg.jobId, Event: "completed" }),
+				},
+				em,
 			);
+			await jobEventRepo.create({ JobID: msg.jobId, Event: "completed" }, em);
 		});
 
 		state.inFlight = Math.max(0, state.inFlight - 1);
@@ -179,21 +171,14 @@ export class WorkerHubService {
 	): Promise<void> {
 		const state = this.stateByWs(ws);
 
-		await AppDataSource.transaction(async (em) => {
-			await em.delete(Lease, { JobID: msg.jobId });
-			await em
-				.createQueryBuilder()
-				.update(Job)
-				.set({ Status: JOB_STATUS_ENUM.FAILED, UpdatedAt: new Date() })
-				.where('"JobID" = :id AND "Status" = :status', {
-					id: msg.jobId,
-					status: JOB_STATUS_ENUM.DISPATCHED,
-				})
-				.execute();
-			await em.save(
-				JobEvent,
-				em.create(JobEvent, { JobID: msg.jobId, Event: "failed" }),
+		await AppDataSource.transaction(async (em: EntityManager) => {
+			await leaseRepo.delete({ JobID: msg.jobId }, em);
+			await jobRepo.update(
+				{ JobID: msg.jobId, Status: JOB_STATUS_ENUM.DISPATCHED },
+				{ Status: JOB_STATUS_ENUM.FAILED },
+				em,
 			);
+			await jobEventRepo.create({ JobID: msg.jobId, Event: "failed" }, em);
 		});
 
 		if (state) state.inFlight = Math.max(0, state.inFlight - 1);
@@ -203,7 +188,7 @@ export class WorkerHubService {
 	private async onPong(ws: WebSocket): Promise<void> {
 		const state = this.stateByWs(ws);
 		if (!state) return;
-		await AppDataSource.getRepository(WorkerReg).update(
+		await workerRegRepo.update(
 			{ WorkerID: state.workerId },
 			{ LastSeenAt: new Date() },
 		);

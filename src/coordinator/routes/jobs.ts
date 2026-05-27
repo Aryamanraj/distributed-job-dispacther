@@ -1,8 +1,6 @@
 import { Router } from "express";
 import { JOB_STATUS_ENUM } from "../../shared/job-status";
-import { AppDataSource } from "../db/data-source";
-import { Job } from "../db/entities/job.entity";
-import { JobEvent } from "../db/entities/job-event.entity";
+import { jobEventRepo, jobRepo } from "../db/repo";
 
 const TERMINAL_STATUSES = new Set([
 	JOB_STATUS_ENUM.COMPLETED,
@@ -15,8 +13,6 @@ const SSE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
 export function createJobsRouter(): Router {
 	const router = Router();
-	const jobRepo = AppDataSource.getRepository(Job);
-	const eventRepo = AppDataSource.getRepository(JobEvent);
 
 	// POST /jobs — submit a job
 	router.post("/", async (req, res) => {
@@ -35,33 +31,33 @@ export function createJobsRouter(): Router {
 		}
 
 		// Idempotency: return existing job if key already seen
-		const existing = await jobRepo.findOne({
-			where: { IdempotencyKey: idempotencyKey },
-		});
+		const { data: existing } = await jobRepo.get(
+			{ where: { IdempotencyKey: idempotencyKey } },
+			false,
+		);
 		if (existing) {
 			res.status(200).json(existing);
 			return;
 		}
 
 		try {
-			const job = jobRepo.create({
+			const { data: job, error: createErr } = await jobRepo.create({
 				IdempotencyKey: idempotencyKey,
 				Payload: payload,
 			});
-			await jobRepo.save(job);
+			if (createErr) throw createErr;
 
-			await eventRepo.save(
-				eventRepo.create({ JobID: job.JobID, Event: "submitted" }),
-			);
+			await jobEventRepo.create({ JobID: job?.JobID, Event: "submitted" });
 
 			res.status(201).json(job);
 		} catch (err: unknown) {
 			// Unique constraint violation — race with another coordinator, return the winner
 			const pgErr = err as { code?: string };
 			if (pgErr.code === "23505") {
-				const winner = await jobRepo.findOne({
-					where: { IdempotencyKey: idempotencyKey },
-				});
+				const { data: winner } = await jobRepo.get(
+					{ where: { IdempotencyKey: idempotencyKey } },
+					false,
+				);
 				res.status(200).json(winner);
 				return;
 			}
@@ -71,7 +67,10 @@ export function createJobsRouter(): Router {
 
 	// GET /jobs/:id — fetch job
 	router.get("/:id", async (req, res) => {
-		const job = await jobRepo.findOne({ where: { JobID: req.params.id } });
+		const { data: job } = await jobRepo.get(
+			{ where: { JobID: req.params.id } },
+			false,
+		);
 		if (!job) {
 			res.status(404).json({ error: "job not found" });
 			return;
@@ -81,7 +80,10 @@ export function createJobsRouter(): Router {
 
 	// DELETE /jobs/:id — cancel a job
 	router.delete("/:id", async (req, res) => {
-		const job = await jobRepo.findOne({ where: { JobID: req.params.id } });
+		const { data: job } = await jobRepo.get(
+			{ where: { JobID: req.params.id } },
+			false,
+		);
 		if (!job) {
 			res.status(404).json({ error: "job not found" });
 			return;
@@ -95,16 +97,17 @@ export function createJobsRouter(): Router {
 			{ JobID: job.JobID },
 			{ Status: JOB_STATUS_ENUM.CANCELLED },
 		);
-		await eventRepo.save(
-			eventRepo.create({ JobID: job.JobID, Event: "cancelled" }),
-		);
+		await jobEventRepo.create({ JobID: job.JobID, Event: "cancelled" });
 
 		res.json({ jobId: job.JobID, status: JOB_STATUS_ENUM.CANCELLED });
 	});
 
 	// GET /jobs/:id/stream — SSE stream until terminal state
 	router.get("/:id/stream", async (req, res) => {
-		const job = await jobRepo.findOne({ where: { JobID: req.params.id } });
+		const { data: job } = await jobRepo.get(
+			{ where: { JobID: req.params.id } },
+			false,
+		);
 		if (!job) {
 			res.status(404).json({ error: "job not found" });
 			return;
@@ -134,9 +137,10 @@ export function createJobsRouter(): Router {
 		}, SSE_TIMEOUT_MS);
 
 		const poll = setInterval(async () => {
-			const current = await jobRepo.findOne({
-				where: { JobID: req.params.id },
-			});
+			const { data: current } = await jobRepo.get(
+				{ where: { JobID: req.params.id } },
+				false,
+			);
 			if (!current) {
 				clearInterval(poll);
 				clearTimeout(deadline);
