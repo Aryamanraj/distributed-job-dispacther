@@ -8,6 +8,7 @@ import type {
 	ObjectLiteral,
 } from "typeorm";
 import type { QueryDeepPartialEntity } from "typeorm/query-builder/QueryPartialEntity";
+import { GenericError, ResponseCode } from "../../../shared/errors";
 import { logger } from "../../../util/logger";
 import { AppDataSource } from "../data-source";
 import type { ResultWithError } from "./types";
@@ -28,7 +29,12 @@ export abstract class BaseRepoService<T extends ObjectLiteral> {
 	): Promise<ResultWithError<T>> {
 		try {
 			const result = await this.repo(em).findOne(options);
-			if (!result && panic) throw new Error(`${this.entityName} not found`);
+			if (!result && panic)
+				throw new GenericError(
+					`${this.entityName} not found`,
+					404,
+					ResponseCode.NOT_FOUND,
+				);
 			return { data: result ?? null, error: null };
 		} catch (error) {
 			logger.error({ err: error }, `Error finding ${this.entityName}`);
@@ -44,7 +50,11 @@ export abstract class BaseRepoService<T extends ObjectLiteral> {
 		try {
 			const result = await this.repo(em).find(options);
 			if (result.length === 0 && panic)
-				throw new Error(`No ${this.entityName} records found`);
+				throw new GenericError(
+					`No ${this.entityName} records found`,
+					404,
+					ResponseCode.NOT_FOUND,
+				);
 			return { data: result, error: null };
 		} catch (error) {
 			logger.error({ err: error }, `Error finding all ${this.entityName}`);
