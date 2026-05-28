@@ -17,11 +17,15 @@ help:
 	@echo "  make build            Compile TypeScript"
 	@echo "  make coordinator-dev  Start coordinator in dev mode"
 	@echo "  make migrate          Run pending DB migrations"
-	@echo "  make check     Biome lint + format check"
-	@echo "  make format    Biome format (write)"
-	@echo "  make test      Run tests"
-	@echo "  make clean     Remove dist/ and node_modules/"
-	@echo "  make commit    Interactive conventional commit"
+	@echo "  make check            Biome lint + format check"
+	@echo "  make format           Biome format (write)"
+	@echo "  make test             Run tests"
+	@echo "  make clean            Remove dist/ and node_modules/"
+	@echo "  make commit           Interactive conventional commit"
+	@echo -e "$(green)Docker$(reset)"
+	@echo "  make up               Build images and start full stack (detached)"
+	@echo "  make down             Stop stack and remove volumes"
+	@echo "  make logs             Tail logs for all services"
 
 .PHONY: setup
 setup:
@@ -55,6 +59,19 @@ test:
 .PHONY: clean
 clean:
 	@rm -rf dist node_modules
+
+# Docker stack
+.PHONY: up
+up:
+	docker compose up --build -d
+
+.PHONY: down
+down:
+	docker compose down -v
+
+.PHONY: logs
+logs:
+	docker compose logs -f --tail=100
 
 .PHONY: commit
 commit: precommit-checks do-commit

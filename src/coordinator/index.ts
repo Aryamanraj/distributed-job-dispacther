@@ -15,6 +15,14 @@ async function main() {
 	await AppDataSource.initialize();
 	logger.info("Database connected");
 
+	logger.info("Running pending migrations");
+	const ran = await AppDataSource.runMigrations({ transaction: "each" });
+	if (ran.length > 0) {
+		logger.info({ count: ran.length }, "Migrations applied");
+	} else {
+		logger.info("Database schema is up to date");
+	}
+
 	const wss = new WebSocketServer({ noServer: true });
 	const chaos = new ChaosService();
 	const workerHub = new WorkerHubService(wss, chaos);
