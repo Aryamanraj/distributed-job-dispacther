@@ -14,11 +14,11 @@ async function main() {
 	await AppDataSource.initialize();
 	logger.info("Database connected");
 
-	const app = createServer();
-	const httpServer = createHttpServer(app);
-
 	const wss = new WebSocketServer({ noServer: true });
 	const workerHub = new WorkerHubService(wss);
+
+	const app = createServer(workerHub);
+	const httpServer = createHttpServer(app);
 	const dispatch = new DispatchService(workerHub);
 	const reaper = new LeaseReaperService();
 

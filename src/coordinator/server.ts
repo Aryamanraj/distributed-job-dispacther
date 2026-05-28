@@ -1,7 +1,9 @@
 import express from "express";
 import { createJobsRouter } from "./routes/jobs";
+import { createStatsRouter } from "./routes/stats";
+import type { WorkerHubService } from "./services/worker-hub.service";
 
-export function createServer() {
+export function createServer(hub: WorkerHubService) {
 	const app = express();
 
 	app.use(express.json());
@@ -11,6 +13,7 @@ export function createServer() {
 	});
 
 	app.use("/jobs", createJobsRouter());
+	app.use("/stats", createStatsRouter(hub));
 
 	return app;
 }
