@@ -1,24 +1,37 @@
+export enum MsgType {
+	// Coordinator → Worker
+	JobDispatch = "job.dispatch",
+	JobAck = "job.ack",
+	ControlSetConcurrency = "control.set_concurrency",
+	Ping = "ping",
+	// Worker → Coordinator
+	WorkerHello = "worker.hello",
+	JobResult = "job.result",
+	JobFailed = "job.failed",
+	Pong = "pong",
+}
+
 // Messages sent from coordinator → worker
 export type CoordToWorkerMsg =
 	| {
-			type: "job.dispatch";
+			type: MsgType.JobDispatch;
 			jobId: string;
 			token: string;
 			payload: Record<string, unknown>;
 			timeoutMs: number;
 	  }
-	| { type: "job.ack"; jobId: string }
-	| { type: "control.set_concurrency"; limit: number }
-	| { type: "ping" };
+	| { type: MsgType.JobAck; jobId: string }
+	| { type: MsgType.ControlSetConcurrency; limit: number }
+	| { type: MsgType.Ping };
 
 // Messages sent from worker → coordinator
 export type WorkerToCoordMsg =
-	| { type: "worker.hello"; workerId: string; concurrencyLimit: number }
+	| { type: MsgType.WorkerHello; workerId: string; concurrencyLimit: number }
 	| {
-			type: "job.result";
+			type: MsgType.JobResult;
 			jobId: string;
 			token: string;
 			result: Record<string, unknown>;
 	  }
-	| { type: "job.failed"; jobId: string; token: string; error: string }
-	| { type: "pong" };
+	| { type: MsgType.JobFailed; jobId: string; token: string; error: string }
+	| { type: MsgType.Pong };

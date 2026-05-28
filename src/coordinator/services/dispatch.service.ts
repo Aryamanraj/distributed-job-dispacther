@@ -1,4 +1,5 @@
 import { JOB_STATUS_ENUM } from "../../shared/job-status";
+import { MsgType } from "../../shared/protocol";
 import { logger } from "../../util/logger";
 import { AppDataSource } from "../db/data-source";
 import { jobRepo, leaseRepo } from "../db/repo";
@@ -11,12 +12,20 @@ export class DispatchService {
 	private running = false;
 	private timer: NodeJS.Timeout | null = null;
 	private isDispatchPaused: () => boolean = () => false;
+	private isDbPartitioned: () => boolean = () => false;
+	private getClockSkewMs: () => number = () => 0;
 
 	constructor(
 		private readonly workerHub: WorkerHubService,
-		opts?: { isDispatchPaused?: () => boolean },
+		opts?: {
+			isDispatchPaused?: () => boolean;
+			isDbPartitioned?: () => boolean;
+			getClockSkewMs?: () => number;
+		},
 	) {
 		if (opts?.isDispatchPaused) this.isDispatchPaused = opts.isDispatchPaused;
+		if (opts?.isDbPartitioned) this.isDbPartitioned = opts.isDbPartitioned;
+		if (opts?.getClockSkewMs) this.getClockSkewMs = opts.getClockSkewMs;
 	}
 
 	start(): void {
@@ -48,6 +57,10 @@ export class DispatchService {
 
 	private async tick(): Promise<void> {
 		if (this.isDispatchPaused()) return;
+		if (this.isDbPartitioned()) {
+			logger.warn("Chaos: DB partitioned — skipping dispatch tick");
+			return;
+		}
 
 		const available = this.workerHub.getAvailableWorkers();
 		if (available.length === 0) return;
@@ -62,14 +75,13 @@ export class DispatchService {
 	// ── Core dispatch transaction ────────────────────────────────────────────
 
 	private async tryDispatchOne(workerId: string): Promise<boolean> {
-		const qr = AppDataSource.createQueryRunner();
-		await qr.connect();
-		await qr.startTransaction();
+		let dispatched: { jobId: string; token: string; payload: unknown } | null =
+			null;
 
-		try {
+		await AppDataSource.transaction(async (em) => {
 			// FOR UPDATE SKIP LOCKED — safe across multiple coordinator replicas;
 			// each picks a different row without blocking each other.
-			const rows: Array<{ JobID: string; Payload: unknown }> = await qr.query(
+			const rows: Array<{ JobID: string; Payload: unknown }> = await em.query(
 				`SELECT "JobID", "Payload"
 				   FROM "Jobs"
 				  WHERE "Status" = $1
@@ -79,21 +91,20 @@ export class DispatchService {
 				[JOB_STATUS_ENUM.PENDING],
 			);
 
-			if (rows.length === 0) {
-				await qr.rollbackTransaction();
-				return false;
-			}
+			if (rows.length === 0) return;
 
 			const { JobID: jobId, Payload: payload } = rows[0];
 
 			// Monotonic fencing token — global across all coordinators and
 			// restarts because it lives in Postgres, not in process memory.
-			const tokenRows: Array<{ nextval: string }> = await qr.query(
+			const tokenRows: Array<{ nextval: string }> = await em.query(
 				`SELECT nextval('fencing_seq') AS nextval`,
 			);
 			const token = tokenRows[0].nextval;
 
-			const expiresAt = new Date(Date.now() + LEASE_TTL_MS);
+			const expiresAt = new Date(
+				Date.now() + LEASE_TTL_MS + this.getClockSkewMs(),
+			);
 
 			await leaseRepo.insert(
 				{
@@ -102,42 +113,44 @@ export class DispatchService {
 					Token: token,
 					ExpiresAt: expiresAt,
 				},
-				qr.manager,
+				em,
 			);
 
 			await jobRepo.update(
 				{ JobID: jobId },
 				{ Status: JOB_STATUS_ENUM.DISPATCHED },
-				qr.manager,
+				em,
 			);
 
-			await qr.commitTransaction();
+			dispatched = { jobId, token, payload };
+		});
 
-			// Send to worker AFTER the DB commit so if the send fails, the
-			// lease reaper will recover the job rather than losing it forever.
-			const sent = this.workerHub.sendJob(workerId, {
-				type: "job.dispatch",
-				jobId,
-				token,
-				payload: payload as Record<string, unknown>,
-				timeoutMs: LEASE_TTL_MS,
-			});
+		if (!dispatched) return false;
 
-			if (!sent) {
-				logger.warn(
-					{ jobId, workerId },
-					"Worker disconnected after dispatch commit — reaper will recover",
-				);
-			} else {
-				logger.info({ jobId, workerId, token }, "Job dispatched");
-			}
+		// Send to worker AFTER the DB commit so if the send fails, the
+		// lease reaper will recover the job rather than losing it forever.
+		const { jobId, token, payload } = dispatched as {
+			jobId: string;
+			token: string;
+			payload: unknown;
+		};
+		const sent = this.workerHub.sendJob(workerId, {
+			type: MsgType.JobDispatch,
+			jobId,
+			token,
+			payload: payload as Record<string, unknown>,
+			timeoutMs: LEASE_TTL_MS,
+		});
 
-			return true;
-		} catch (err) {
-			await qr.rollbackTransaction();
-			throw err;
-		} finally {
-			await qr.release();
+		if (!sent) {
+			logger.warn(
+				{ jobId, workerId },
+				"Worker disconnected after dispatch commit — reaper will recover",
+			);
+		} else {
+			logger.info({ jobId, workerId, token }, "Job dispatched");
 		}
+
+		return true;
 	}
 }

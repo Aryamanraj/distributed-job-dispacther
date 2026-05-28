@@ -4,6 +4,7 @@ import { logger } from "../../util/logger";
 import { AppDataSource } from "../db/data-source";
 import { Job } from "../db/entities/job.entity";
 import { Lease } from "../db/entities/lease.entity";
+import type { ChaosService } from "./chaos.service";
 
 const REAPER_INTERVAL_MS = 5_000;
 
@@ -17,6 +18,8 @@ const REAPER_INTERVAL_MS = 5_000;
 export class LeaseReaperService {
 	private running = false;
 	private timer: NodeJS.Timeout | null = null;
+
+	constructor(private readonly chaos?: ChaosService) {}
 
 	start(): void {
 		this.running = true;
@@ -46,6 +49,10 @@ export class LeaseReaperService {
 	}
 
 	private async tick(): Promise<void> {
+		if (this.chaos?.isDbPartitioned()) {
+			logger.warn("Chaos: DB partitioned — skipping reaper tick");
+			return;
+		}
 		await AppDataSource.transaction(async (em) => {
 			// Lock expired leases — SKIP LOCKED avoids contention across replicas.
 			const leases = await em.find(Lease, {

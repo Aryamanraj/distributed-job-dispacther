@@ -2,9 +2,11 @@ import type { EntityManager } from "typeorm";
 import WebSocket, { type WebSocketServer } from "ws";
 import { JOB_STATUS_ENUM } from "../../shared/job-status";
 import type { CoordToWorkerMsg, WorkerToCoordMsg } from "../../shared/protocol";
+import { MsgType } from "../../shared/protocol";
 import { logger } from "../../util/logger";
 import { AppDataSource } from "../db/data-source";
 import { jobEventRepo, jobRepo, leaseRepo, workerRegRepo } from "../db/repo";
+import type { ChaosService } from "./chaos.service";
 
 interface WorkerState {
 	ws: WebSocket;
@@ -18,7 +20,10 @@ export class WorkerHubService {
 	private readonly workers = new Map<string, WorkerState>();
 	private readonly pingTimer: NodeJS.Timeout;
 
-	constructor(wss: WebSocketServer) {
+	constructor(
+		wss: WebSocketServer,
+		private readonly chaos?: ChaosService,
+	) {
 		wss.on("connection", (ws) => this.handleConnection(ws));
 		this.pingTimer = setInterval(() => this.pingAll(), 30_000);
 	}
@@ -60,16 +65,16 @@ export class WorkerHubService {
 		setId: (id: string) => void,
 	): Promise<void> {
 		switch (msg.type) {
-			case "worker.hello":
+			case MsgType.WorkerHello:
 				await this.onHello(ws, msg, setId);
 				break;
-			case "job.result":
+			case MsgType.JobResult:
 				await this.onResult(ws, msg);
 				break;
-			case "job.failed":
+			case MsgType.JobFailed:
 				await this.onFailed(ws, msg);
 				break;
-			case "pong":
+			case MsgType.Pong:
 				await this.onPong(ws);
 				break;
 			default:
@@ -81,7 +86,7 @@ export class WorkerHubService {
 
 	private async onHello(
 		ws: WebSocket,
-		msg: Extract<WorkerToCoordMsg, { type: "worker.hello" }>,
+		msg: Extract<WorkerToCoordMsg, { type: MsgType.WorkerHello }>,
 		setId: (id: string) => void,
 	): Promise<void> {
 		const { workerId, concurrencyLimit } = msg;
@@ -115,7 +120,7 @@ export class WorkerHubService {
 
 	private async onResult(
 		ws: WebSocket,
-		msg: Extract<WorkerToCoordMsg, { type: "job.result" }>,
+		msg: Extract<WorkerToCoordMsg, { type: MsgType.JobResult }>,
 	): Promise<void> {
 		const state = this.stateByWs(ws);
 		if (!state) {
@@ -157,8 +162,11 @@ export class WorkerHubService {
 
 		state.inFlight = Math.max(0, state.inFlight - 1);
 
-		// TODO: chaos drop_acks — check chaosState.dropAcksRemaining before sending
-		this.sendMsg(ws, { type: "job.ack", jobId: msg.jobId });
+		if (this.chaos?.consumeDropAck()) {
+			logger.warn({ jobId: msg.jobId }, "Chaos: job.ack dropped");
+		} else {
+			this.sendMsg(ws, { type: MsgType.JobAck, jobId: msg.jobId });
+		}
 		logger.info(
 			{ jobId: msg.jobId, workerId: state.workerId },
 			"Job completed",
@@ -167,7 +175,7 @@ export class WorkerHubService {
 
 	private async onFailed(
 		ws: WebSocket,
-		msg: Extract<WorkerToCoordMsg, { type: "job.failed" }>,
+		msg: Extract<WorkerToCoordMsg, { type: MsgType.JobFailed }>,
 	): Promise<void> {
 		const state = this.stateByWs(ws);
 
@@ -199,7 +207,7 @@ export class WorkerHubService {
 	private pingAll(): void {
 		for (const [workerId, state] of this.workers) {
 			if (state.ws.readyState === WebSocket.OPEN) {
-				this.sendMsg(state.ws, { type: "ping" });
+				this.sendMsg(state.ws, { type: MsgType.Ping });
 			} else {
 				this.deregister(workerId);
 			}
@@ -222,7 +230,7 @@ export class WorkerHubService {
 
 	sendJob(
 		workerId: string,
-		msg: Extract<CoordToWorkerMsg, { type: "job.dispatch" }>,
+		msg: Extract<CoordToWorkerMsg, { type: MsgType.JobDispatch }>,
 	): boolean {
 		const state = this.workers.get(workerId);
 		if (!state || state.ws.readyState !== WebSocket.OPEN) return false;
