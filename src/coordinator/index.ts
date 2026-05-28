@@ -6,6 +6,7 @@ import { config } from "./config";
 import { AppDataSource } from "./db/data-source";
 import { createServer } from "./server";
 import { DispatchService } from "./services/dispatch.service";
+import { LeaseReaperService } from "./services/lease-reaper.service";
 import { WorkerHubService } from "./services/worker-hub.service";
 
 async function main() {
@@ -19,6 +20,7 @@ async function main() {
 	const wss = new WebSocketServer({ noServer: true });
 	const workerHub = new WorkerHubService(wss);
 	const dispatch = new DispatchService(workerHub);
+	const reaper = new LeaseReaperService();
 
 	httpServer.on("upgrade", (req, socket, head) => {
 		wss.handleUpgrade(req, socket, head, (ws) => {
@@ -32,11 +34,13 @@ async function main() {
 			"Coordinator listening",
 		);
 		dispatch.start();
+		reaper.start();
 	});
 
 	// Graceful shutdown
 	process.on("SIGTERM", () => {
 		dispatch.stop();
+		reaper.stop();
 		workerHub.stop();
 		httpServer.close(() => process.exit(0));
 	});
