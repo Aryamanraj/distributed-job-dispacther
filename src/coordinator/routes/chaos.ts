@@ -5,7 +5,7 @@ import type { ChaosService } from "../services/chaos.service";
 import { ChaosAction } from "../services/chaos.service";
 import type { ChaosRequestDto } from "./dto/chaos.dto";
 
-const VALID_ACTIONS = new Set<string>(Object.values(ChaosAction));
+const VALID_FAULTS = new Set<string>(Object.values(ChaosAction));
 
 export function createChaosRouter(chaos: ChaosService): Router {
 	const router = Router();
@@ -21,22 +21,23 @@ export function createChaosRouter(chaos: ChaosService): Router {
 		);
 	});
 
+	// Spec body: { "fault": "pause_dispatch", "params": { "ms": 5000 } }
 	router.post("/", (req, res) => {
-		const { action, value } = req.body as ChaosRequestDto;
+		const { fault, params = {} } = req.body as ChaosRequestDto;
 
-		if (typeof action !== "string" || !VALID_ACTIONS.has(action)) {
+		if (typeof fault !== "string" || !VALID_FAULTS.has(fault)) {
 			makeResponse(
 				res,
 				400,
 				false,
-				`invalid action — must be one of: ${[...VALID_ACTIONS].join(", ")}`,
+				`invalid fault — must be one of: ${[...VALID_FAULTS].join(", ")}`,
 				null,
 				ResponseCode.VALIDATION_ERROR,
 			);
 			return;
 		}
 
-		chaos.apply(action as ChaosAction, typeof value === "number" ? value : 0);
+		chaos.apply(fault as ChaosAction, params);
 		makeResponse(
 			res,
 			200,

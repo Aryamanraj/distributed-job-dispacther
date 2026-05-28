@@ -5,7 +5,11 @@ import { createStatsRouter } from "./routes/stats";
 import type { ChaosService } from "./services/chaos.service";
 import type { WorkerHubService } from "./services/worker-hub.service";
 
-export function createServer(hub: WorkerHubService, chaos: ChaosService) {
+export function createServer(
+	hub: WorkerHubService,
+	chaos: ChaosService,
+	startedAt: Date,
+) {
 	const app = express();
 
 	app.use(express.json());
@@ -15,7 +19,7 @@ export function createServer(hub: WorkerHubService, chaos: ChaosService) {
 	});
 
 	app.use("/jobs", createJobsRouter());
-	app.use("/stats", createStatsRouter(hub));
+	app.use("/stats", createStatsRouter(hub, startedAt));
 	app.use("/chaos", createChaosRouter(chaos));
 
 	return app;

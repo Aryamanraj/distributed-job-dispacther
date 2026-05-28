@@ -17,46 +17,50 @@ export interface ChaosState {
 }
 
 export class ChaosService {
-	private dispatchPaused = false;
+	// Timestamps (ms since epoch) until which faults are active. 0 = inactive.
+	private dispatchPausedUntil = 0;
 	private dropAcksRemaining = 0;
-	private dbPartitioned = false;
+	private dbPartitionedUntil = 0;
 	private clockSkewMs = 0;
 
-	apply(action: ChaosAction, value = 0): void {
+	apply(action: ChaosAction, params: Record<string, number> = {}): void {
 		switch (action) {
 			case ChaosAction.PauseDispatch:
-				this.dispatchPaused = true;
-				logger.warn("Chaos: dispatch paused");
+				this.dispatchPausedUntil = Date.now() + (params.ms ?? 0);
+				logger.warn({ ms: params.ms }, "Chaos: dispatch paused");
 				break;
 			case ChaosAction.ResumeDispatch:
-				this.dispatchPaused = false;
-				logger.warn("Chaos: dispatch resumed");
+				this.dispatchPausedUntil = 0;
+				logger.warn("Chaos: dispatch resumed manually");
 				break;
 			case ChaosAction.DropAcks:
-				this.dropAcksRemaining = value;
-				logger.warn({ count: value }, "Chaos: will drop next N acks");
+				this.dropAcksRemaining = params.count ?? 0;
+				logger.warn({ count: params.count }, "Chaos: will drop next N acks");
 				break;
 			case ChaosAction.PartitionDb:
-				this.dbPartitioned = true;
-				logger.warn("Chaos: DB partitioned");
+				this.dbPartitionedUntil = Date.now() + (params.ms ?? 0);
+				logger.warn({ ms: params.ms }, "Chaos: DB partitioned");
 				break;
 			case ChaosAction.RestoreDb:
-				this.dbPartitioned = false;
-				logger.warn("Chaos: DB partition restored");
+				this.dbPartitionedUntil = 0;
+				logger.warn("Chaos: DB partition restored manually");
 				break;
 			case ChaosAction.ClockSkew:
-				this.clockSkewMs = value;
-				logger.warn({ skewMs: value }, "Chaos: clock skew set");
+				this.clockSkewMs = (params.offsetSeconds ?? 0) * 1000;
+				logger.warn(
+					{ offsetSeconds: params.offsetSeconds },
+					"Chaos: clock skew set",
+				);
 				break;
 		}
 	}
 
 	isDispatchPaused(): boolean {
-		return this.dispatchPaused;
+		return Date.now() < this.dispatchPausedUntil;
 	}
 
 	isDbPartitioned(): boolean {
-		return this.dbPartitioned;
+		return Date.now() < this.dbPartitionedUntil;
 	}
 
 	getClockSkewMs(): number {
@@ -79,9 +83,9 @@ export class ChaosService {
 
 	getState(): ChaosState {
 		return {
-			dispatchPaused: this.dispatchPaused,
+			dispatchPaused: this.isDispatchPaused(),
 			dropAcksRemaining: this.dropAcksRemaining,
-			dbPartitioned: this.dbPartitioned,
+			dbPartitioned: this.isDbPartitioned(),
 			clockSkewMs: this.clockSkewMs,
 		};
 	}

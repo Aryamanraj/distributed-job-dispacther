@@ -8,7 +8,14 @@ import { executeJob } from "./executor";
 interface InFlightJob {
 	/** Fencing token received with the dispatch. Sent back on result/failed. */
 	token: string;
+	/** Stored result — kept until ack received, for retry on dropped acks. */
+	result?: Record<string, unknown>;
+	retryCount: number;
+	retryTimer?: NodeJS.Timeout;
 }
+
+const MAX_RESULT_RETRIES = 5;
+const RESULT_RETRY_DELAY_MS = 5_000;
 
 /**
  * Connects to a coordinator, processes dispatched jobs, and sends results.
@@ -17,12 +24,18 @@ interface InFlightJob {
  * the worker records the token per job and discards the result if the token
  * has been superseded (coordinator will reject it anyway, but we skip the
  * send to avoid noise). The coordinator is the authoritative clock.
+ *
+ * Result retry: after sending job.result the worker waits for job.ack. If the
+ * ack is dropped (chaos fault), the worker retries up to MAX_RESULT_RETRIES
+ * times. The coordinator handles duplicate commits idempotently.
  */
 export class WorkerService {
 	private ws: WebSocket | null = null;
 	private reconnectTimer: NodeJS.Timeout | null = null;
 	private readonly inFlight = new Map<string, InFlightJob>();
 	private running = false;
+	/** Mutable: updated at runtime via control.set_concurrency messages. */
+	private concurrencyLimit = config.concurrencyLimit;
 
 	start(): void {
 		this.running = true;
@@ -34,6 +47,10 @@ export class WorkerService {
 		if (this.reconnectTimer) {
 			clearTimeout(this.reconnectTimer);
 			this.reconnectTimer = null;
+		}
+		// Cancel any pending retry timers
+		for (const job of this.inFlight.values()) {
+			if (job.retryTimer) clearTimeout(job.retryTimer);
 		}
 		this.ws?.close();
 	}
@@ -49,7 +66,7 @@ export class WorkerService {
 			this.send({
 				type: MsgType.WorkerHello,
 				workerId: config.workerId,
-				concurrencyLimit: config.concurrencyLimit,
+				concurrencyLimit: this.concurrencyLimit,
 			});
 			logger.info({ workerId: config.workerId }, "Connected and registered");
 		});
@@ -93,17 +110,31 @@ export class WorkerService {
 				);
 				break;
 			case MsgType.JobAck:
-				logger.debug({ jobId: msg.jobId }, "Job ack received");
+				this.handleAck(msg.jobId);
 				break;
 			case MsgType.Ping:
 				this.send({ type: MsgType.Pong });
 				break;
 			case MsgType.ControlSetConcurrency:
-				logger.info({ limit: msg.limit }, "Concurrency limit update received");
+				this.concurrencyLimit = msg.limit;
+				logger.info(
+					{ limit: msg.limit },
+					"Concurrency limit updated at runtime",
+				);
 				break;
 			default:
 				logger.warn({ msg }, "Unknown message from coordinator");
 		}
+	}
+
+	// ── Ack handler ──────────────────────────────────────────────────────────
+
+	private handleAck(jobId: string): void {
+		const job = this.inFlight.get(jobId);
+		if (!job) return;
+		if (job.retryTimer) clearTimeout(job.retryTimer);
+		this.inFlight.delete(jobId);
+		logger.debug({ jobId }, "Job ack received — cleared from in-flight");
 	}
 
 	// ── Job execution ────────────────────────────────────────────────────────
@@ -118,23 +149,46 @@ export class WorkerService {
 			return;
 		}
 
-		this.inFlight.set(jobId, { token });
+		// Enforce concurrency limit: reject immediately so coordinator can re-queue
+		if (this.inFlight.size >= this.concurrencyLimit) {
+			logger.warn(
+				{ jobId, concurrencyLimit: this.concurrencyLimit },
+				"At capacity — rejecting dispatch",
+			);
+			this.send({
+				type: MsgType.JobFailed,
+				jobId,
+				token,
+				error: "worker at capacity",
+			});
+			return;
+		}
+
+		this.inFlight.set(jobId, { token, retryCount: 0 });
 		logger.info({ jobId, token }, "Executing job");
 
 		try {
 			const result = await executeJob(jobId, payload);
 
 			// Guard: check token is still current before sending result.
-			// Coordinator enforces this too, but skip the send to avoid noise.
-			if (this.inFlight.get(jobId)?.token !== token) {
+			const current = this.inFlight.get(jobId);
+			if (!current || current.token !== token) {
 				logger.warn({ jobId }, "Token superseded — discarding result");
+				this.inFlight.delete(jobId);
 				return;
 			}
 
+			// Store result for retry and send. inFlight cleaned up in handleAck.
+			current.result = result;
 			this.send({ type: MsgType.JobResult, jobId, token, result });
-			logger.info({ jobId }, "Job result sent");
+			logger.info({ jobId }, "Job result sent — awaiting ack");
+			this.scheduleResultRetry(jobId, token);
 		} catch (err) {
-			if (this.inFlight.get(jobId)?.token !== token) return;
+			const current = this.inFlight.get(jobId);
+			if (!current || current.token !== token) return;
+			// Failed jobs: clean up immediately; coordinator marks FAILED, reaper
+			// won't touch it. No retry for worker-side execution failures.
+			this.inFlight.delete(jobId);
 			this.send({
 				type: MsgType.JobFailed,
 				jobId,
@@ -142,20 +196,47 @@ export class WorkerService {
 				error: err instanceof Error ? err.message : String(err),
 			});
 			logger.error({ err, jobId }, "Job failed");
-		} finally {
-			if (this.inFlight.get(jobId)?.token === token) {
-				this.inFlight.delete(jobId);
-			}
 		}
+	}
+
+	// ── Result retry (for dropped acks under chaos) ──────────────────────────
+
+	private scheduleResultRetry(jobId: string, token: string): void {
+		const job = this.inFlight.get(jobId);
+		if (!job) return;
+
+		if (job.retryCount >= MAX_RESULT_RETRIES) {
+			logger.warn(
+				{ jobId, retries: MAX_RESULT_RETRIES },
+				"Max retries reached — giving up on job.result",
+			);
+			this.inFlight.delete(jobId);
+			return;
+		}
+
+		job.retryTimer = setTimeout(() => {
+			const current = this.inFlight.get(jobId);
+			if (!current || current.token !== token || !current.result) return;
+			current.retryCount++;
+			logger.warn(
+				{ jobId, attempt: current.retryCount },
+				"No ack received — retrying job.result",
+			);
+			this.send({
+				type: MsgType.JobResult,
+				jobId,
+				token,
+				result: current.result,
+			});
+			this.scheduleResultRetry(jobId, token);
+		}, RESULT_RETRY_DELAY_MS);
 	}
 
 	// ── Helpers ──────────────────────────────────────────────────────────────
 
 	private send(msg: WorkerToCoordMsg): void {
-		if (this.ws?.readyState !== WebSocket.OPEN) {
-			logger.warn({ type: msg.type }, "Cannot send — WebSocket not open");
-			return;
+		if (this.ws?.readyState === WebSocket.OPEN) {
+			this.ws.send(JSON.stringify(msg));
 		}
-		this.ws.send(JSON.stringify(msg));
 	}
 }

@@ -11,6 +11,8 @@ import { LeaseReaperService } from "./services/lease-reaper.service";
 import { WorkerHubService } from "./services/worker-hub.service";
 
 async function main() {
+	const startedAt = new Date();
+
 	logger.info("Connecting to database");
 	await AppDataSource.initialize();
 	logger.info("Database connected");
@@ -27,7 +29,7 @@ async function main() {
 	const chaos = new ChaosService();
 	const workerHub = new WorkerHubService(wss, chaos);
 
-	const app = createServer(workerHub, chaos);
+	const app = createServer(workerHub, chaos, startedAt);
 	const httpServer = createHttpServer(app);
 	const dispatch = new DispatchService(workerHub, {
 		isDispatchPaused: () => chaos.isDispatchPaused(),

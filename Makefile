@@ -26,6 +26,7 @@ help:
 	@echo "  make up               Build images and start full stack (detached)"
 	@echo "  make down             Stop stack and remove volumes"
 	@echo "  make logs             Tail logs for all services"
+	@echo "  make chaos            Run chaos harness → chaos_report.txt"
 
 .PHONY: setup
 setup:
@@ -72,6 +73,11 @@ down:
 .PHONY: logs
 logs:
 	docker compose logs -f --tail=100
+
+.PHONY: chaos
+chaos:
+	@if [ ! -f chaos_harness.py ]; then echo "chaos_harness.py not found — place it in the repo root"; exit 1; fi
+	python3 chaos_harness.py 2>&1 | tee chaos_report.txt
 
 .PHONY: commit
 commit: precommit-checks do-commit

@@ -136,12 +136,35 @@ export class WorkerHubService {
 			false,
 		);
 
-		// No lease = expired. Token mismatch = fencing violation. Either way: discard.
+		// No lease = expired. Token mismatch = fencing violation.
+		// Special case: lease is gone but job is already COMPLETED — this is a
+		// worker retry after a dropped ack. Ack again to stop the retry loop.
 		if (!lease.data || String(lease.data.Token) !== String(msg.token)) {
-			logger.warn(
-				{ jobId: msg.jobId, workerId: state.workerId, hasLease: !!lease.data },
-				"Lease missing or token mismatch — discarding result",
+			const { data: alreadyDone } = await jobRepo.get(
+				{
+					where: {
+						JobID: msg.jobId,
+						Status: JOB_STATUS_ENUM.COMPLETED,
+					},
+				},
+				false,
 			);
+			if (alreadyDone) {
+				logger.info(
+					{ jobId: msg.jobId, workerId: state.workerId },
+					"Duplicate result (ack was dropped) — re-acking",
+				);
+				this.sendMsg(ws, { type: MsgType.JobAck, jobId: msg.jobId });
+			} else {
+				logger.warn(
+					{
+						jobId: msg.jobId,
+						workerId: state.workerId,
+						hasLease: !!lease.data,
+					},
+					"Lease missing or token mismatch — discarding result",
+				);
+			}
 			state.inFlight = Math.max(0, state.inFlight - 1);
 			return;
 		}

@@ -35,6 +35,18 @@ export function createJobsRouter(): Router {
 				);
 				return;
 			}
+			// Spec §3.3: idempotency keys are opaque strings up to 128 bytes
+			if (Buffer.byteLength(idempotencyKey, "utf8") > 128) {
+				makeResponse(
+					res,
+					400,
+					false,
+					"idempotencyKey must be 128 bytes or fewer",
+					null,
+					ResponseCode.VALIDATION_ERROR,
+				);
+				return;
+			}
 			if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
 				makeResponse(
 					res,
