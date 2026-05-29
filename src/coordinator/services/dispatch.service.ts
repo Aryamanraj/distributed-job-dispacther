@@ -1,8 +1,12 @@
 import { JOB_STATUS_ENUM } from "../../shared/job-status";
 import { MsgType } from "../../shared/protocol";
 import { logger } from "../../util/logger";
+import { config } from "../config";
 import { AppDataSource } from "../db/data-source";
-import { jobRepo, leaseRepo } from "../db/repo";
+import { Job } from "../db/entities/job.entity";
+import { JobTransition } from "../db/entities/job-transition.entity";
+import { Lease } from "../db/entities/lease.entity";
+import { LeaseHistory } from "../db/entities/lease-history.entity";
 import type { WorkerHubService } from "./worker-hub.service";
 
 const DISPATCH_INTERVAL_MS = 200;
@@ -86,48 +90,79 @@ export class DispatchService {
 			null;
 
 		await AppDataSource.transaction(async (em) => {
-			// FOR UPDATE SKIP LOCKED — safe across multiple coordinator replicas;
-			// each picks a different row without blocking each other.
-			const rows: Array<{ JobID: string; Payload: unknown }> = await em.query(
-				`SELECT "JobID", "Payload"
-				   FROM "Jobs"
-				  WHERE "Status" = $1
-				  ORDER BY "CreatedAt"
-				  LIMIT 1
-				  FOR UPDATE SKIP LOCKED`,
-				[JOB_STATUS_ENUM.PENDING],
+			// Pick one PENDING job. SKIP LOCKED lets multiple coordinator
+			// replicas dispatch in parallel without blocking on each other's
+			// row locks.
+			const [job] = await em.find(Job, {
+				where: { Status: JOB_STATUS_ENUM.PENDING },
+				order: { CreatedAt: "ASC" },
+				take: 1,
+				lock: { mode: "pessimistic_write", onLocked: "skip_locked" },
+			});
+			if (!job) return;
+
+			const jobId = job.JobID;
+			const payload = job.Payload;
+
+			// Fencing token + issue timestamp must be allocated atomically across
+			// all coordinators: if token A < token B, then ts(A) must be <= ts(B).
+			// nextval() alone is serialized by Postgres on the sequence, but
+			// clock_timestamp() is a separate volatile read with no defined
+			// evaluation order relative to nextval(), so two concurrent sessions
+			// can interleave (read clock → wait for seq → get token) and produce
+			// (lower_token, higher_ts) pairs that break global monotonicity.
+			// We close the race with a transaction-scoped advisory lock taken
+			// in a CTE so it is guaranteed to be acquired before the sequence
+			// and clock are read.
+			const [{ nextval: token, ts_us: issuedAtMs }]: Array<{
+				nextval: string;
+				ts_us: string;
+			}> = await em.query(
+				`WITH _lock AS (SELECT pg_advisory_xact_lock(7919))
+				 SELECT nextval('fencing_seq') AS nextval,
+				        (EXTRACT(EPOCH FROM clock_timestamp()) * 1000000)::bigint AS ts_us
+				 FROM _lock`,
 			);
 
-			if (rows.length === 0) return;
-
-			const { JobID: jobId, Payload: payload } = rows[0];
-
-			// Monotonic fencing token — global across all coordinators and
-			// restarts because it lives in Postgres, not in process memory.
-			const tokenRows: Array<{ nextval: string }> = await em.query(
-				`SELECT nextval('fencing_seq') AS nextval`,
-			);
-			const token = tokenRows[0].nextval;
-
+			// Lease expiry intentionally uses the chaos-skewed clock — that's
+			// what the clock_skew fault is meant to perturb. Fencing itself
+			// does not depend on it (token is from the sequence above).
 			const expiresAt = new Date(
 				Date.now() + LEASE_TTL_MS + this.getClockSkewMs(),
 			);
 
-			await leaseRepo.insert(
-				{
-					JobID: jobId,
-					WorkerID: workerId,
-					Token: token,
-					ExpiresAt: expiresAt,
-				},
-				em,
-			);
+			await em.insert(Lease, {
+				JobID: jobId,
+				WorkerID: workerId,
+				Token: token,
+				ExpiresAt: expiresAt,
+			});
 
-			await jobRepo.update(
+			await em.update(
+				Job,
 				{ JobID: jobId },
 				{ Status: JOB_STATUS_ENUM.DISPATCHED },
-				em,
 			);
+
+			// Audit/history rows always use the real wall clock. IssuedAtMs
+			// comes from Postgres (above) so it stays aligned with token
+			// order across concurrent coordinators.
+			const nowMs = String(Date.now());
+			await em.insert(LeaseHistory, {
+				JobID: jobId,
+				WorkerID: workerId,
+				Fence: token,
+				IssuedAtMs: issuedAtMs,
+				TerminatedAtMs: null,
+			});
+
+			await em.insert(JobTransition, {
+				JobID: jobId,
+				FromStatus: JOB_STATUS_ENUM.PENDING,
+				ToStatus: JOB_STATUS_ENUM.DISPATCHED,
+				AtMs: nowMs,
+				CoordinatorId: config.coordinatorId,
+			});
 
 			dispatched = { jobId, token, payload };
 		});
