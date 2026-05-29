@@ -1,7 +1,7 @@
 export enum JOB_STATUS_ENUM {
 	PENDING = "pending",
 	DISPATCHED = "dispatched",
-	COMPLETED = "completed",
+	SUCCEEDED = "succeeded",
 	FAILED = "failed",
 	CANCELLED = "cancelled",
 }

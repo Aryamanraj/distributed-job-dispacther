@@ -6,13 +6,8 @@ export const makeResponse = (
 	statusCode: number,
 	success: boolean,
 	message: string,
-	data: unknown = null,
+	payload: object | null = null,
 	code: ResponseCode = success ? ResponseCode.OK : ResponseCode.INTERNAL_ERROR,
 ): void => {
-	res.status(statusCode).json({
-		success,
-		code,
-		message,
-		data,
-	});
+	res.status(statusCode).json({ success, code, message, ...(payload ?? {}) });
 };

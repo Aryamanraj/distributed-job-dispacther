@@ -2,11 +2,15 @@ import { Router } from "express";
 import { type GenericError, ResponseCode } from "../../shared/errors";
 import { JOB_STATUS_ENUM } from "../../shared/job-status";
 import { makeResponse } from "../../util/response";
-import { jobEventRepo, jobRepo } from "../db/repo";
+import { config } from "../config";
+import { AppDataSource } from "../db/data-source";
+import { Job } from "../db/entities/job.entity";
+import { JobTransition } from "../db/entities/job-transition.entity";
+import { jobRepo } from "../db/repo";
 
 // SSE stream should close once the job reaches one of these states.
 const TERMINAL_STATUSES = new Set<JOB_STATUS_ENUM>([
-	JOB_STATUS_ENUM.COMPLETED,
+	JOB_STATUS_ENUM.SUCCEEDED,
 	JOB_STATUS_ENUM.FAILED,
 	JOB_STATUS_ENUM.CANCELLED,
 ]);
@@ -20,29 +24,29 @@ export function createJobsRouter(): Router {
 	// POST /jobs — submit a job
 	router.post("/", async (req, res) => {
 		try {
-			const { idempotencyKey, payload } = req.body as {
-				idempotencyKey?: string;
+			const { idempotency_key, payload } = req.body as {
+				idempotency_key?: string;
 				payload?: Record<string, unknown>;
 			};
 
-			if (!idempotencyKey || typeof idempotencyKey !== "string") {
+			if (!idempotency_key || typeof idempotency_key !== "string") {
 				makeResponse(
 					res,
 					400,
 					false,
-					"idempotencyKey is required",
+					"idempotency_key is required",
 					null,
 					ResponseCode.VALIDATION_ERROR,
 				);
 				return;
 			}
 			// Spec §3.3: idempotency keys are opaque strings up to 128 bytes
-			if (Buffer.byteLength(idempotencyKey, "utf8") > 128) {
+			if (Buffer.byteLength(idempotency_key, "utf8") > 128) {
 				makeResponse(
 					res,
 					400,
 					false,
-					"idempotencyKey must be 128 bytes or fewer",
+					"idempotency_key must be 128 bytes or fewer",
 					null,
 					ResponseCode.VALIDATION_ERROR,
 				);
@@ -62,7 +66,7 @@ export function createJobsRouter(): Router {
 
 			// Idempotency: return existing job if key already seen
 			const { data: existing } = await jobRepo.get(
-				{ where: { IdempotencyKey: idempotencyKey } },
+				{ where: { IdempotencyKey: idempotency_key } },
 				false,
 			);
 			if (existing) {
@@ -71,39 +75,46 @@ export function createJobsRouter(): Router {
 					200,
 					true,
 					"job already submitted",
-					existing,
+					{ job_id: existing.JobID },
 					ResponseCode.JOB_DUPLICATE,
 				);
 				return;
 			}
 
-			const { data: job, error: createErr } = await jobRepo.create({
-				IdempotencyKey: idempotencyKey,
-				Payload: payload,
+			const job = await AppDataSource.transaction(async (em) => {
+				const inserted = await em.save(
+					em.create(Job, {
+						IdempotencyKey: idempotency_key,
+						Payload: payload,
+					}),
+				);
+				await em.insert(JobTransition, {
+					JobID: inserted.JobID,
+					FromStatus: "",
+					ToStatus: JOB_STATUS_ENUM.PENDING,
+					AtMs: String(Date.now()),
+					CoordinatorId: config.coordinatorId,
+				});
+				return inserted;
 			});
-			if (createErr) throw createErr;
-
-			await jobEventRepo.create({ JobID: job?.JobID, Event: "submitted" });
 
 			makeResponse(
 				res,
 				201,
 				true,
 				"job created",
-				job,
+				{ job_id: job.JobID },
 				ResponseCode.JOB_CREATED,
 			);
 		} catch (err: unknown) {
 			// Unique constraint violation — race with another coordinator, return the winner
 			const pgErr = err as { code?: string; status?: number; message?: string };
 			if (pgErr.code === "23505") {
+				const { idempotency_key: key = "" } = req.body as {
+					idempotency_key?: string;
+				};
 				const { data: winner } = await jobRepo.get(
-					{
-						where: {
-							IdempotencyKey: (req.body as { idempotencyKey: string })
-								.idempotencyKey,
-						},
-					},
+					{ where: { IdempotencyKey: key } },
 					false,
 				);
 				makeResponse(
@@ -111,7 +122,7 @@ export function createJobsRouter(): Router {
 					200,
 					true,
 					"job already submitted",
-					winner,
+					{ job_id: winner?.JobID ?? null },
 					ResponseCode.JOB_DUPLICATE,
 				);
 				return;
@@ -184,11 +195,20 @@ export function createJobsRouter(): Router {
 				return;
 			}
 
-			await jobRepo.update(
-				{ JobID: job.JobID },
-				{ Status: JOB_STATUS_ENUM.CANCELLED },
-			);
-			await jobEventRepo.create({ JobID: job.JobID, Event: "cancelled" });
+			await AppDataSource.transaction(async (em) => {
+				await em.update(
+					Job,
+					{ JobID: job.JobID },
+					{ Status: JOB_STATUS_ENUM.CANCELLED },
+				);
+				await em.insert(JobTransition, {
+					JobID: job.JobID,
+					FromStatus: JOB_STATUS_ENUM.PENDING,
+					ToStatus: JOB_STATUS_ENUM.CANCELLED,
+					AtMs: String(Date.now()),
+					CoordinatorId: config.coordinatorId,
+				});
+			});
 
 			makeResponse(
 				res,

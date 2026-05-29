@@ -8,6 +8,7 @@ export enum MsgType {
 	WorkerHello = "worker.hello",
 	JobResult = "job.result",
 	JobFailed = "job.failed",
+	JobHeartbeat = "job.heartbeat",
 	Pong = "pong",
 }
 
@@ -44,5 +45,10 @@ export type WorkerToCoordMsg =
 			 * false/absent → real execution failure; coordinator marks FAILED.
 			 */
 			temporary?: boolean;
+	  }
+	| {
+			type: MsgType.JobHeartbeat;
+			jobId: string;
+			token: string;
 	  }
 	| { type: MsgType.Pong };
