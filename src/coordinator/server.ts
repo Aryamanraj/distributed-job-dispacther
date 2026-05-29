@@ -1,4 +1,5 @@
 import express from "express";
+import { createAuditRouter } from "./routes/audit";
 import { createChaosRouter } from "./routes/chaos";
 import { createJobsRouter } from "./routes/jobs";
 import { createStatsRouter } from "./routes/stats";
@@ -19,6 +20,7 @@ export function createServer(
 		res.json({ status: "ok" });
 	});
 
+	app.use("/audit", createAuditRouter());
 	app.use("/jobs", createJobsRouter());
 	app.use("/stats", createStatsRouter(chaos, startedAt));
 	app.use("/chaos", createChaosRouter(chaos));
