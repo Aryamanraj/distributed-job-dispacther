@@ -65,11 +65,18 @@ export class DispatchService {
 		const available = this.workerHub.getAvailableWorkers();
 		if (available.length === 0) return;
 
-		for (const worker of available) {
-			const dispatched = await this.tryDispatchOne(worker.workerId);
-			// No more pending jobs — stop scanning workers for this tick
-			if (!dispatched) break;
-		}
+		// Round-robin across workers: one job per worker per pass, repeat until
+		// no more pending jobs or all workers are at capacity.
+		let anyDispatched: boolean;
+		do {
+			anyDispatched = false;
+			for (const worker of available) {
+				if (worker.inFlight >= worker.concurrencyLimit) continue;
+				const dispatched = await this.tryDispatchOne(worker.workerId);
+				if (!dispatched) return; // queue empty — stop entirely
+				anyDispatched = true;
+			}
+		} while (anyDispatched);
 	}
 
 	// ── Core dispatch transaction ────────────────────────────────────────────

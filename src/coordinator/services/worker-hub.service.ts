@@ -202,18 +202,36 @@ export class WorkerHubService {
 	): Promise<void> {
 		const state = this.stateByWs(ws);
 
-		await AppDataSource.transaction(async (em: EntityManager) => {
-			await leaseRepo.delete({ JobID: msg.jobId }, em);
-			await jobRepo.update(
-				{ JobID: msg.jobId, Status: JOB_STATUS_ENUM.DISPATCHED },
-				{ Status: JOB_STATUS_ENUM.FAILED },
-				em,
+		if (msg.temporary) {
+			// Transient rejection (e.g. worker at capacity) — re-queue so it can be
+			// dispatched again. The lease is deleted and the job returns to PENDING.
+			await AppDataSource.transaction(async (em: EntityManager) => {
+				await leaseRepo.delete({ JobID: msg.jobId }, em);
+				await jobRepo.update(
+					{ JobID: msg.jobId, Status: JOB_STATUS_ENUM.DISPATCHED },
+					{ Status: JOB_STATUS_ENUM.PENDING },
+					em,
+				);
+			});
+			if (state) state.inFlight = Math.max(0, state.inFlight - 1);
+			logger.warn(
+				{ jobId: msg.jobId, error: msg.error },
+				"Job transiently rejected — re-queued as PENDING",
 			);
-			await jobEventRepo.create({ JobID: msg.jobId, Event: "failed" }, em);
-		});
-
-		if (state) state.inFlight = Math.max(0, state.inFlight - 1);
-		logger.info({ jobId: msg.jobId, error: msg.error }, "Job failed");
+		} else {
+			// Real execution failure — mark permanently FAILED.
+			await AppDataSource.transaction(async (em: EntityManager) => {
+				await leaseRepo.delete({ JobID: msg.jobId }, em);
+				await jobRepo.update(
+					{ JobID: msg.jobId, Status: JOB_STATUS_ENUM.DISPATCHED },
+					{ Status: JOB_STATUS_ENUM.FAILED },
+					em,
+				);
+				await jobEventRepo.create({ JobID: msg.jobId, Event: "failed" }, em);
+			});
+			if (state) state.inFlight = Math.max(0, state.inFlight - 1);
+			logger.info({ jobId: msg.jobId, error: msg.error }, "Job failed");
+		}
 	}
 
 	private async onPong(ws: WebSocket): Promise<void> {
@@ -272,6 +290,30 @@ export class WorkerHubService {
 			inFlight: w.inFlight,
 			concurrencyLimit: w.concurrencyLimit,
 		}));
+	}
+
+	/**
+	 * Push a new concurrency limit to a connected worker at runtime.
+	 * Returns false if the worker is unknown or its socket is not OPEN.
+	 *
+	 * The coordinator updates its local view immediately; the worker applies
+	 * the new limit on receipt of `control.set_concurrency`. Subsequent
+	 * dispatches respect the new ceiling.
+	 */
+	async setConcurrency(workerId: string, limit: number): Promise<boolean> {
+		const state = this.workers.get(workerId);
+		if (!state || state.ws.readyState !== WebSocket.OPEN) return false;
+		state.concurrencyLimit = limit;
+		this.sendMsg(state.ws, {
+			type: MsgType.ControlSetConcurrency,
+			limit,
+		});
+		await workerRegRepo.update(
+			{ WorkerID: workerId },
+			{ ConcurrencyLimit: limit },
+		);
+		logger.info({ workerId, limit }, "Worker concurrency updated at runtime");
+		return true;
 	}
 
 	stop(): void {

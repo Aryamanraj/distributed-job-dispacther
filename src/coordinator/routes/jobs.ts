@@ -4,7 +4,8 @@ import { JOB_STATUS_ENUM } from "../../shared/job-status";
 import { makeResponse } from "../../util/response";
 import { jobEventRepo, jobRepo } from "../db/repo";
 
-const TERMINAL_STATUSES = new Set([
+// SSE stream should close once the job reaches one of these states.
+const TERMINAL_STATUSES = new Set<JOB_STATUS_ENUM>([
 	JOB_STATUS_ENUM.COMPLETED,
 	JOB_STATUS_ENUM.FAILED,
 	JOB_STATUS_ENUM.CANCELLED,
@@ -170,8 +171,16 @@ export function createJobsRouter(): Router {
 				makeResponse(res, 404, false, "job not found");
 				return;
 			}
-			if (TERMINAL_STATUSES.has(job.Status as JOB_STATUS_ENUM)) {
-				makeResponse(res, 409, false, `job is already ${job.Status}`);
+			// Spec §2: clients can cancel an UNSTARTED job. Once a job has been
+			// dispatched to a worker we cannot recall it — the worker is already
+			// executing and a lease is outstanding. Reject with 409.
+			if (job.Status !== JOB_STATUS_ENUM.PENDING) {
+				makeResponse(
+					res,
+					409,
+					false,
+					`cannot cancel job in status ${job.Status}`,
+				);
 				return;
 			}
 

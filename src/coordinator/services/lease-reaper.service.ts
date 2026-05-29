@@ -4,6 +4,7 @@ import { logger } from "../../util/logger";
 import { AppDataSource } from "../db/data-source";
 import { Job } from "../db/entities/job.entity";
 import { Lease } from "../db/entities/lease.entity";
+import { jobEventRepo } from "../db/repo";
 import type { ChaosService } from "./chaos.service";
 
 const REAPER_INTERVAL_MS = 5_000;
@@ -53,11 +54,15 @@ export class LeaseReaperService {
 			logger.warn("Chaos: DB partitioned — skipping reaper tick");
 			return;
 		}
+		// Use the coordinator's (possibly skewed) view of now so the clock_skew
+		// chaos fault actually moves the reap horizon — otherwise lease TTLs
+		// would silently depend on the wall clock and the fault would be a no-op.
+		const now = new Date(this.chaos ? this.chaos.now() : Date.now());
 		await AppDataSource.transaction(async (em) => {
 			// Lock expired leases — SKIP LOCKED avoids contention across replicas.
 			const leases = await em.find(Lease, {
 				where: {
-					ExpiresAt: LessThan(new Date()),
+					ExpiresAt: LessThan(now),
 					Job: { Status: JOB_STATUS_ENUM.DISPATCHED },
 				},
 				lock: { mode: "pessimistic_write", onLocked: "skip_locked" },
@@ -74,6 +79,10 @@ export class LeaseReaperService {
 				{ JobID: In(ids) },
 				{ Status: JOB_STATUS_ENUM.PENDING, UpdatedAt: new Date() },
 			);
+
+			for (const id of ids) {
+				await jobEventRepo.create({ JobID: id, Event: "lost" }, em);
+			}
 
 			logger.info(
 				{ count: ids.length },

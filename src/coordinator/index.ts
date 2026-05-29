@@ -3,7 +3,7 @@ import { createServer as createHttpServer } from "node:http";
 import { WebSocketServer } from "ws";
 import { logger } from "../util/logger";
 import { config } from "./config";
-import { AppDataSource } from "./db/data-source";
+import { AppDataSource, installDbPartitionGuard } from "./db/data-source";
 import { createServer } from "./server";
 import { ChaosService } from "./services/chaos.service";
 import { DispatchService } from "./services/dispatch.service";
@@ -27,6 +27,12 @@ async function main() {
 
 	const wss = new WebSocketServer({ noServer: true });
 	const chaos = new ChaosService();
+
+	// Make `partition_db` actually refuse every query for the fault window —
+	// without this hook the flag would only stop dispatch/reaper ticks and the
+	// fault would be a no-op for jobs/stats/result-commit code paths.
+	installDbPartitionGuard(() => chaos.isDbPartitioned());
+
 	const workerHub = new WorkerHubService(wss, chaos);
 
 	const app = createServer(workerHub, chaos, startedAt);

@@ -2,11 +2,14 @@ import { Router } from "express";
 import { LessThan, MoreThan } from "typeorm";
 import { JOB_STATUS_ENUM } from "../../shared/job-status";
 import { config } from "../config";
-import { AppDataSource } from "../db/data-source";
-import { Job } from "../db/entities/job.entity";
-import { JobEvent } from "../db/entities/job-event.entity";
-import { Lease } from "../db/entities/lease.entity";
-import type { WorkerHubService } from "../services/worker-hub.service";
+import { jobRepo } from "../db/repo/job.repo";
+import { jobEventRepo } from "../db/repo/job-event.repo";
+import { leaseRepo } from "../db/repo/lease.repo";
+import { workerRegRepo } from "../db/repo/worker-reg.repo";
+import type { ChaosService } from "../services/chaos.service";
+
+// A worker is considered globally alive if it ponged within 3× the ping interval.
+const WORKER_ALIVE_MS = 90_000;
 
 // Must match LEASE_TTL_MS in dispatch.service.ts
 const LEASE_TTL_MS = 60_000;
@@ -23,73 +26,111 @@ function formatUptime(ms: number): string {
 }
 
 export function createStatsRouter(
-	hub: WorkerHubService,
+	chaos: ChaosService,
 	startedAt: Date,
 ): Router {
 	const router = Router();
 
 	router.get("/", async (_req, res) => {
-		const now = new Date();
-		const db = AppDataSource;
+		const now = new Date(chaos.now());
 
 		const [
-			pending,
-			dispatched,
-			activeLeases,
-			stuckLeases,
-			expiringLeases,
-			recentEvents,
+			{ data: pendingJobs },
+			{ data: dispatchedJobs },
+			{ data: activeLeases },
+			{ data: stuckLeases },
+			{ data: expiringLeases },
+			{ data: recentEvents },
 		] = await Promise.all([
-			db
-				.getRepository(Job)
-				.count({ where: { Status: JOB_STATUS_ENUM.PENDING } }),
-			db
-				.getRepository(Job)
-				.count({ where: { Status: JOB_STATUS_ENUM.DISPATCHED } }),
-			// All active leases
-			db.getRepository(Lease).count(),
-			// stuck>30s: lease issued >30s ago = ExpiresAt < now + (TTL - 30s)
-			db.getRepository(Lease).count({
+			jobRepo.count({ where: { Status: JOB_STATUS_ENUM.PENDING } }),
+			jobRepo.count({ where: { Status: JOB_STATUS_ENUM.DISPATCHED } }),
+			leaseRepo.count({}),
+			leaseRepo.count({
 				where: {
 					ExpiresAt: LessThan(new Date(now.getTime() + LEASE_TTL_MS - 30_000)),
 				},
 			}),
-			// expiring<5s: ExpiresAt within next 5 seconds
-			db.getRepository(Lease).count({
+			leaseRepo.count({
 				where: { ExpiresAt: LessThan(new Date(now.getTime() + 5_000)) },
 			}),
-			// last 60s events from JobEvents table
-			db.getRepository(JobEvent).find({
-				where: { Ts: MoreThan(new Date(now.getTime() - 60_000)) },
-				select: { Event: true },
-			}),
+			jobEventRepo.getAll(
+				{
+					where: { Ts: MoreThan(new Date(now.getTime() - 60_000)) },
+					select: { Event: true },
+				},
+				false,
+			),
 		]);
 
-		const submitted60 = recentEvents.filter(
+		const submitted60 = (recentEvents ?? []).filter(
 			(e) => e.Event === "submitted",
 		).length;
-		const completed60 = recentEvents.filter(
+		const completed60 = (recentEvents ?? []).filter(
 			(e) => e.Event === "completed",
 		).length;
-		const failed60 = recentEvents.filter((e) => e.Event === "failed").length;
-		const lost60 = Math.max(0, submitted60 - completed60 - failed60);
+		const failed60 = (recentEvents ?? []).filter(
+			(e) => e.Event === "failed",
+		).length;
+		const lost60 = (recentEvents ?? []).filter(
+			(e) => e.Event === "lost",
+		).length;
 
-		const workers = hub.getWorkerStats();
+		// Global worker view: WorkerReg for all alive workers + Leases count per
+		// worker for inFlight. Using Leases as the source of truth means any
+		// coordinator can report accurate inFlight for all workers cluster-wide —
+		// no coordinator-to-coordinator gossip needed.
+		const [{ data: globalWorkers }, { data: allLeases }] = await Promise.all([
+			workerRegRepo.getAll(
+				{
+					where: {
+						LastSeenAt: MoreThan(new Date(Date.now() - WORKER_ALIVE_MS)),
+					},
+					order: { WorkerID: "ASC" },
+				},
+				false,
+			),
+			leaseRepo.getAll({ select: { WorkerID: true } }, false),
+		]);
+		const inFlightMap = new Map<string, number>();
+		for (const lease of allLeases ?? []) {
+			inFlightMap.set(
+				lease.WorkerID,
+				(inFlightMap.get(lease.WorkerID) ?? 0) + 1,
+			);
+		}
 		const workerDetail =
-			workers.length === 0
+			(globalWorkers ?? []).length === 0
 				? "none"
-				: workers
-						.map((w) => `${w.workerId}:${w.inFlight}/${w.concurrencyLimit}`)
+				: (globalWorkers ?? [])
+						.map((w) => {
+							const inFlight = inFlightMap.get(w.WorkerID) ?? 0;
+							return `${w.WorkerID}:${inFlight}/${w.ConcurrencyLimit}`;
+						})
 						.join("  ");
 
-		const uptimeMs = now.getTime() - startedAt.getTime();
+		const uptimeMs = Date.now() - startedAt.getTime();
+
+		const chaosState = chaos.getState();
+		const chaosLine = [
+			chaosState.dispatchPaused ? "dispatch_paused" : null,
+			chaosState.dbPartitioned ? "db_partitioned" : null,
+			chaosState.dropAcksRemaining > 0
+				? `drop_acks=${chaosState.dropAcksRemaining}`
+				: null,
+			chaosState.clockSkewMs !== 0
+				? `clock_skew=${chaosState.clockSkewMs}ms`
+				: null,
+		]
+			.filter(Boolean)
+			.join("  ");
 
 		const lines = [
-			`coordinator: ${config.coordinatorId}  uptime: ${formatUptime(uptimeMs)}`,
-			`workers:     ${workers.length} connected  ( ${workerDetail} )`,
-			`queue:       ${pending} pending  ${dispatched} in-flight  ${stuckLeases} stuck>30s`,
-			`leases:      ${activeLeases} active   ${expiringLeases} expiring<5s`,
+			`coordinator: c${config.coordinatorId}  uptime: ${formatUptime(uptimeMs)}  mode: leaderless  leader_term: n/a`,
+			`workers:     ${globalWorkers.length} connected  ( ${workerDetail} )`,
+			`queue:       ${pendingJobs ?? 0} pending  ${dispatchedJobs ?? 0} in-flight  ${stuckLeases ?? 0} stuck>30s`,
+			`leases:      ${activeLeases ?? 0} active   ${expiringLeases ?? 0} expiring<5s`,
 			`last 60s:    ${submitted60} submitted  ${completed60} completed  ${failed60} failed  ${lost60} lost`,
+			`chaos:       ${chaosLine || "none"}`,
 		];
 
 		res.setHeader("Content-Type", "text/plain; charset=utf-8");

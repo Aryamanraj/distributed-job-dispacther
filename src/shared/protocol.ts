@@ -33,5 +33,16 @@ export type WorkerToCoordMsg =
 			token: string;
 			result: Record<string, unknown>;
 	  }
-	| { type: MsgType.JobFailed; jobId: string; token: string; error: string }
+	| {
+			type: MsgType.JobFailed;
+			jobId: string;
+			token: string;
+			error: string;
+			/**
+			 * true  → transient rejection (e.g. worker at capacity); coordinator
+			 *         must re-queue the job as PENDING so it can be re-dispatched.
+			 * false/absent → real execution failure; coordinator marks FAILED.
+			 */
+			temporary?: boolean;
+	  }
 	| { type: MsgType.Pong };

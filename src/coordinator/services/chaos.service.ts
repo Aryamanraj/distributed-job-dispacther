@@ -68,6 +68,15 @@ export class ChaosService {
 	}
 
 	/**
+	 * Coordinator's view of "now", skewed by the active clock_skew fault.
+	 * Use this anywhere lease expiry, stats windows, or any time comparison
+	 * that participates in correctness is computed — never raw `Date.now()`.
+	 */
+	now(): number {
+		return Date.now() + this.clockSkewMs;
+	}
+
+	/**
 	 * Returns true if this ack should be dropped (and decrements the counter).
 	 * Returns false if the ack should be sent normally.
 	 */
