@@ -34,8 +34,8 @@ export class ChaosService {
 				logger.warn("Chaos: dispatch resumed manually");
 				break;
 			case ChaosAction.DropAcks:
-				this.dropAcksRemaining = params.count ?? 0;
-				logger.warn({ count: params.count }, "Chaos: will drop next N acks");
+				this.dropAcksRemaining = params.n ?? 0;
+				logger.warn({ n: params.n }, "Chaos: will drop next N acks");
 				break;
 			case ChaosAction.PartitionDb:
 				this.dbPartitionedUntil = Date.now() + (params.ms ?? 0);
@@ -46,11 +46,8 @@ export class ChaosService {
 				logger.warn("Chaos: DB partition restored manually");
 				break;
 			case ChaosAction.ClockSkew:
-				this.clockSkewMs = (params.offsetSeconds ?? 0) * 1000;
-				logger.warn(
-					{ offsetSeconds: params.offsetSeconds },
-					"Chaos: clock skew set",
-				);
+				this.clockSkewMs = (params.seconds ?? 0) * 1000;
+				logger.warn({ seconds: params.seconds }, "Chaos: clock skew set");
 				break;
 		}
 	}

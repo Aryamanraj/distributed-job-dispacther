@@ -2,8 +2,8 @@ import { Router } from "express";
 import { LessThan, MoreThan } from "typeorm";
 import { JOB_STATUS_ENUM } from "../../shared/job-status";
 import { config } from "../config";
+import { AppDataSource } from "../db/data-source";
 import { jobRepo } from "../db/repo/job.repo";
-import { jobEventRepo } from "../db/repo/job-event.repo";
 import { leaseRepo } from "../db/repo/lease.repo";
 import { workerRegRepo } from "../db/repo/worker-reg.repo";
 import type { ChaosService } from "../services/chaos.service";
@@ -40,7 +40,6 @@ export function createStatsRouter(
 			{ data: activeLeases },
 			{ data: stuckLeases },
 			{ data: expiringLeases },
-			{ data: recentEvents },
 		] = await Promise.all([
 			jobRepo.count({ where: { Status: JOB_STATUS_ENUM.PENDING } }),
 			jobRepo.count({ where: { Status: JOB_STATUS_ENUM.DISPATCHED } }),
@@ -53,26 +52,30 @@ export function createStatsRouter(
 			leaseRepo.count({
 				where: { ExpiresAt: LessThan(new Date(now.getTime() + 5_000)) },
 			}),
-			jobEventRepo.getAll(
-				{
-					where: { Ts: MoreThan(new Date(now.getTime() - 60_000)) },
-					select: { Event: true },
-				},
-				false,
-			),
 		]);
 
-		const submitted60 = (recentEvents ?? []).filter(
-			(e) => e.Event === "submitted",
+		// Use a raw query so we can compare BIGINT AtMs without TypeORM string coercion.
+		const windowMs = String(now.getTime() - 60_000);
+		const recentTransitions = await AppDataSource.query<
+			Array<{ FromStatus: string; ToStatus: string }>
+		>(
+			`SELECT "FromStatus", "ToStatus" FROM "JobTransitions" WHERE "AtMs" > $1`,
+			[windowMs],
+		);
+
+		const submitted60 = recentTransitions.filter(
+			(t) => t.FromStatus === "" && t.ToStatus === JOB_STATUS_ENUM.PENDING,
 		).length;
-		const completed60 = (recentEvents ?? []).filter(
-			(e) => e.Event === "completed",
+		const completed60 = recentTransitions.filter(
+			(t) => t.ToStatus === JOB_STATUS_ENUM.SUCCEEDED,
 		).length;
-		const failed60 = (recentEvents ?? []).filter(
-			(e) => e.Event === "failed",
+		const failed60 = recentTransitions.filter(
+			(t) => t.ToStatus === JOB_STATUS_ENUM.FAILED,
 		).length;
-		const lost60 = (recentEvents ?? []).filter(
-			(e) => e.Event === "lost",
+		const lost60 = recentTransitions.filter(
+			(t) =>
+				t.FromStatus === JOB_STATUS_ENUM.DISPATCHED &&
+				t.ToStatus === JOB_STATUS_ENUM.PENDING,
 		).length;
 
 		// Global worker view: WorkerReg for all alive workers + Leases count per
@@ -125,7 +128,7 @@ export function createStatsRouter(
 			.join("  ");
 
 		const lines = [
-			`coordinator: c${config.coordinatorId}  uptime: ${formatUptime(uptimeMs)}  mode: leaderless  leader_term: n/a`,
+			`coordinator: ${config.coordinatorId}  uptime: ${formatUptime(uptimeMs)}  mode: leaderless`,
 			`workers:     ${globalWorkers.length} connected  ( ${workerDetail} )`,
 			`queue:       ${pendingJobs ?? 0} pending  ${dispatchedJobs ?? 0} in-flight  ${stuckLeases ?? 0} stuck>30s`,
 			`leases:      ${activeLeases ?? 0} active   ${expiringLeases ?? 0} expiring<5s`,
