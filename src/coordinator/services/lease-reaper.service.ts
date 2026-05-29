@@ -1,10 +1,12 @@
-import { In, LessThan } from "typeorm";
+import { In, IsNull, LessThan } from "typeorm";
 import { JOB_STATUS_ENUM } from "../../shared/job-status";
 import { logger } from "../../util/logger";
+import { config } from "../config";
 import { AppDataSource } from "../db/data-source";
 import { Job } from "../db/entities/job.entity";
+import { JobTransition } from "../db/entities/job-transition.entity";
 import { Lease } from "../db/entities/lease.entity";
-import { jobEventRepo } from "../db/repo";
+import { LeaseHistory } from "../db/entities/lease-history.entity";
 import type { ChaosService } from "./chaos.service";
 
 const REAPER_INTERVAL_MS = 5_000;
@@ -76,13 +78,26 @@ export class LeaseReaperService {
 			await em.delete(Lease, { JobID: In(ids) });
 			await em.update(
 				Job,
-				{ JobID: In(ids) },
+				{ JobID: In(ids), Status: JOB_STATUS_ENUM.DISPATCHED },
 				{ Status: JOB_STATUS_ENUM.PENDING, UpdatedAt: new Date() },
 			);
 
-			for (const id of ids) {
-				await jobEventRepo.create({ JobID: id, Event: "lost" }, em);
-			}
+			const reaperAtMs = String(Date.now());
+			await em.update(
+				LeaseHistory,
+				{ JobID: In(ids), TerminatedAtMs: IsNull() },
+				{ TerminatedAtMs: reaperAtMs },
+			);
+			await em.insert(
+				JobTransition,
+				ids.map((id) => ({
+					JobID: id,
+					FromStatus: JOB_STATUS_ENUM.DISPATCHED,
+					ToStatus: JOB_STATUS_ENUM.PENDING,
+					AtMs: reaperAtMs,
+					CoordinatorId: config.coordinatorId,
+				})),
+			);
 
 			logger.info(
 				{ count: ids.length },
