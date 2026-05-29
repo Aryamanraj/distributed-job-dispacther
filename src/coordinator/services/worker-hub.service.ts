@@ -1,11 +1,18 @@
 import type { EntityManager } from "typeorm";
+import { IsNull } from "typeorm";
 import WebSocket, { type WebSocketServer } from "ws";
 import { JOB_STATUS_ENUM } from "../../shared/job-status";
 import type { CoordToWorkerMsg, WorkerToCoordMsg } from "../../shared/protocol";
 import { MsgType } from "../../shared/protocol";
 import { logger } from "../../util/logger";
+import { config } from "../config";
 import { AppDataSource } from "../db/data-source";
-import { jobEventRepo, jobRepo, leaseRepo, workerRegRepo } from "../db/repo";
+import { CommitAttempt } from "../db/entities/commit-attempt.entity";
+import { Job } from "../db/entities/job.entity";
+import { JobTransition } from "../db/entities/job-transition.entity";
+import { Lease } from "../db/entities/lease.entity";
+import { LeaseHistory } from "../db/entities/lease-history.entity";
+import { jobRepo, leaseRepo, workerRegRepo } from "../db/repo";
 import type { ChaosService } from "./chaos.service";
 
 interface WorkerState {
@@ -15,6 +22,8 @@ interface WorkerState {
 	inFlight: number;
 	connectedAt: Date;
 }
+
+const HEARTBEAT_LEASE_TTL_MS = 15_000;
 
 export class WorkerHubService {
 	private readonly workers = new Map<string, WorkerState>();
@@ -27,8 +36,6 @@ export class WorkerHubService {
 		wss.on("connection", (ws) => this.handleConnection(ws));
 		this.pingTimer = setInterval(() => this.pingAll(), 30_000);
 	}
-
-	// ── Connection lifecycle ────────────────────────────────────────────────
 
 	private handleConnection(ws: WebSocket): void {
 		let workerId: string | null = null;
@@ -50,12 +57,12 @@ export class WorkerHubService {
 		});
 
 		ws.on("close", () => {
-			if (workerId) this.deregister(workerId);
+			if (workerId) void this.deregister(workerId, ws);
 		});
 
 		ws.on("error", (err) => {
 			logger.error({ err, workerId }, "Worker WebSocket error");
-			if (workerId) this.deregister(workerId);
+			if (workerId) void this.deregister(workerId, ws);
 		});
 	}
 
@@ -74,6 +81,9 @@ export class WorkerHubService {
 			case MsgType.JobFailed:
 				await this.onFailed(ws, msg);
 				break;
+			case MsgType.JobHeartbeat:
+				await this.onHeartbeat(ws, msg);
+				break;
 			case MsgType.Pong:
 				await this.onPong(ws);
 				break;
@@ -81,8 +91,6 @@ export class WorkerHubService {
 				logger.warn({ msg }, "Unknown message type from worker");
 		}
 	}
-
-	// ── Message handlers ────────────────────────────────────────────────────
 
 	private async onHello(
 		ws: WebSocket,
@@ -144,7 +152,7 @@ export class WorkerHubService {
 				{
 					where: {
 						JobID: msg.jobId,
-						Status: JOB_STATUS_ENUM.COMPLETED,
+						Status: JOB_STATUS_ENUM.SUCCEEDED,
 					},
 				},
 				false,
@@ -169,21 +177,66 @@ export class WorkerHubService {
 			return;
 		}
 
+		let accepted = false;
 		await AppDataSource.transaction(async (em: EntityManager) => {
-			await leaseRepo.delete({ JobID: msg.jobId }, em);
-			await jobRepo.update(
-				{ JobID: msg.jobId },
+			const del = await em.delete(Lease, {
+				JobID: msg.jobId,
+				WorkerID: state.workerId,
+				Token: String(msg.token),
+			});
+			if ((del.affected ?? 0) === 0) return;
+
+			const upd = await em.update(
+				Job,
+				{ JobID: msg.jobId, Status: JOB_STATUS_ENUM.DISPATCHED },
 				{
-					Status: JOB_STATUS_ENUM.COMPLETED,
+					Status: JOB_STATUS_ENUM.SUCCEEDED,
 					Result: msg.result,
 					UpdatedAt: new Date(),
 				},
-				em,
 			);
-			await jobEventRepo.create({ JobID: msg.jobId, Event: "completed" }, em);
+			if ((upd.affected ?? 0) === 0) return;
+
+			const nowMs = String(Date.now());
+			await em.insert(CommitAttempt, {
+				JobID: msg.jobId,
+				Accepted: true,
+				Fence: String(msg.token),
+				WorkerID: state.workerId,
+				AtMs: nowMs,
+			});
+			await em.update(
+				LeaseHistory,
+				{ JobID: msg.jobId, TerminatedAtMs: IsNull() },
+				{ TerminatedAtMs: nowMs },
+			);
+			await em.insert(JobTransition, {
+				JobID: msg.jobId,
+				FromStatus: JOB_STATUS_ENUM.DISPATCHED,
+				ToStatus: JOB_STATUS_ENUM.SUCCEEDED,
+				AtMs: nowMs,
+				CoordinatorId: config.coordinatorId,
+			});
+			accepted = true;
 		});
 
 		state.inFlight = Math.max(0, state.inFlight - 1);
+
+		if (!accepted) {
+			// Reaped mid-flight or job already terminal — re-ack if job succeeded
+			const { data: alreadyDone } = await jobRepo.get(
+				{ where: { JobID: msg.jobId, Status: JOB_STATUS_ENUM.SUCCEEDED } },
+				false,
+			);
+			if (alreadyDone) {
+				logger.info(
+					{ jobId: msg.jobId, workerId: state.workerId },
+					"Reaped mid-flight — re-acking succeeded job",
+				);
+				this.sendMsg(ws, { type: MsgType.JobAck, jobId: msg.jobId });
+			}
+			return;
+		}
 
 		if (this.chaos?.consumeDropAck()) {
 			logger.warn({ jobId: msg.jobId }, "Chaos: job.ack dropped");
@@ -206,11 +259,16 @@ export class WorkerHubService {
 			// Transient rejection (e.g. worker at capacity) — re-queue so it can be
 			// dispatched again. The lease is deleted and the job returns to PENDING.
 			await AppDataSource.transaction(async (em: EntityManager) => {
-				await leaseRepo.delete({ JobID: msg.jobId }, em);
-				await jobRepo.update(
+				await em.delete(Lease, { JobID: msg.jobId });
+				await em.update(
+					Job,
 					{ JobID: msg.jobId, Status: JOB_STATUS_ENUM.DISPATCHED },
 					{ Status: JOB_STATUS_ENUM.PENDING },
-					em,
+				);
+				await em.update(
+					LeaseHistory,
+					{ JobID: msg.jobId, TerminatedAtMs: IsNull() },
+					{ TerminatedAtMs: String(Date.now()) },
 				);
 			});
 			if (state) state.inFlight = Math.max(0, state.inFlight - 1);
@@ -221,13 +279,25 @@ export class WorkerHubService {
 		} else {
 			// Real execution failure — mark permanently FAILED.
 			await AppDataSource.transaction(async (em: EntityManager) => {
-				await leaseRepo.delete({ JobID: msg.jobId }, em);
-				await jobRepo.update(
+				await em.delete(Lease, { JobID: msg.jobId });
+				await em.update(
+					Job,
 					{ JobID: msg.jobId, Status: JOB_STATUS_ENUM.DISPATCHED },
 					{ Status: JOB_STATUS_ENUM.FAILED },
-					em,
 				);
-				await jobEventRepo.create({ JobID: msg.jobId, Event: "failed" }, em);
+				const nowMs = String(Date.now());
+				await em.update(
+					LeaseHistory,
+					{ JobID: msg.jobId, TerminatedAtMs: IsNull() },
+					{ TerminatedAtMs: nowMs },
+				);
+				await em.insert(JobTransition, {
+					JobID: msg.jobId,
+					FromStatus: JOB_STATUS_ENUM.DISPATCHED,
+					ToStatus: JOB_STATUS_ENUM.FAILED,
+					AtMs: nowMs,
+					CoordinatorId: config.coordinatorId,
+				});
 			});
 			if (state) state.inFlight = Math.max(0, state.inFlight - 1);
 			logger.info({ jobId: msg.jobId, error: msg.error }, "Job failed");
@@ -243,6 +313,24 @@ export class WorkerHubService {
 		);
 	}
 
+	private async onHeartbeat(
+		ws: WebSocket,
+		msg: Extract<WorkerToCoordMsg, { type: MsgType.JobHeartbeat }>,
+	): Promise<void> {
+		const state = this.stateByWs(ws);
+		if (!state) return;
+		const skew = this.chaos?.getClockSkewMs() ?? 0;
+		const newExpiry = new Date(Date.now() + HEARTBEAT_LEASE_TTL_MS + skew);
+		await AppDataSource.getRepository(Lease).update(
+			{
+				JobID: msg.jobId,
+				WorkerID: state.workerId,
+				Token: String(msg.token),
+			},
+			{ ExpiresAt: newExpiry },
+		);
+	}
+
 	// ── Keepalive ───────────────────────────────────────────────────────────
 
 	private pingAll(): void {
@@ -250,14 +338,23 @@ export class WorkerHubService {
 			if (state.ws.readyState === WebSocket.OPEN) {
 				this.sendMsg(state.ws, { type: MsgType.Ping });
 			} else {
-				this.deregister(workerId);
+				void this.deregister(workerId, state.ws);
 			}
 		}
 	}
 
-	private deregister(workerId: string): void {
+	private async deregister(workerId: string, ws: WebSocket): Promise<void> {
+		// Only act if THIS ws is still the registered one. onHello closes
+		// stale connections during reconnect — the eventual close event for
+		// the old ws must not delete the freshly-registered new entry.
+		const state = this.workers.get(workerId);
+		if (!state || state.ws !== ws) return;
+
 		this.workers.delete(workerId);
 		logger.info({ workerId }, "Worker deregistered");
+		// Lease cleanup happens via the TTL reaper: once heartbeats stop
+		// arriving, ExpiresAt isn't extended and the lease is reaped within
+		// LEASE_TTL_MS + reaper cadence (~20s).
 	}
 
 	// ── Public API for dispatch loop ────────────────────────────────────────

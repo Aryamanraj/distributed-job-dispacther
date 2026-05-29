@@ -6,16 +6,16 @@ import { config } from "./config";
 import { executeJob } from "./executor";
 
 interface InFlightJob {
-	/** Fencing token received with the dispatch. Sent back on result/failed. */
 	token: string;
-	/** Stored result — kept until ack received, for retry on dropped acks. */
 	result?: Record<string, unknown>;
 	retryCount: number;
 	retryTimer?: NodeJS.Timeout;
+	heartbeatTimer?: NodeJS.Timeout;
 }
 
 const MAX_RESULT_RETRIES = 5;
 const RESULT_RETRY_DELAY_MS = 5_000;
+const HEARTBEAT_INTERVAL_MS = 5_000;
 
 /**
  * Connects to a coordinator, processes dispatched jobs, and sends results.
@@ -34,7 +34,6 @@ export class WorkerService {
 	private reconnectTimer: NodeJS.Timeout | null = null;
 	private readonly inFlight = new Map<string, InFlightJob>();
 	private running = false;
-	/** Mutable: updated at runtime via control.set_concurrency messages. */
 	private concurrencyLimit = config.concurrencyLimit;
 
 	start(): void {
@@ -51,11 +50,10 @@ export class WorkerService {
 		// Cancel any pending retry timers
 		for (const job of this.inFlight.values()) {
 			if (job.retryTimer) clearTimeout(job.retryTimer);
+			if (job.heartbeatTimer) clearInterval(job.heartbeatTimer);
 		}
 		this.ws?.close();
 	}
-
-	// ── Connection lifecycle ─────────────────────────────────────────────────
 
 	private connect(): void {
 		logger.info({ url: config.coordinatorUrl }, "Connecting to coordinator");
@@ -100,8 +98,6 @@ export class WorkerService {
 		);
 	}
 
-	// ── Message routing ──────────────────────────────────────────────────────
-
 	private route(msg: CoordToWorkerMsg): void {
 		switch (msg.type) {
 			case MsgType.JobDispatch:
@@ -127,12 +123,11 @@ export class WorkerService {
 		}
 	}
 
-	// ── Ack handler ──────────────────────────────────────────────────────────
-
 	private handleAck(jobId: string): void {
 		const job = this.inFlight.get(jobId);
 		if (!job) return;
 		if (job.retryTimer) clearTimeout(job.retryTimer);
+		if (job.heartbeatTimer) clearInterval(job.heartbeatTimer);
 		this.inFlight.delete(jobId);
 		logger.debug({ jobId }, "Job ack received — cleared from in-flight");
 	}
@@ -168,6 +163,15 @@ export class WorkerService {
 		this.inFlight.set(jobId, { token, retryCount: 0 });
 		logger.info({ jobId, token }, "Executing job");
 
+		const inflight = this.inFlight.get(jobId);
+		if (inflight) {
+			inflight.heartbeatTimer = setInterval(() => {
+				const cur = this.inFlight.get(jobId);
+				if (!cur || cur.token !== token) return;
+				this.send({ type: MsgType.JobHeartbeat, jobId, token });
+			}, HEARTBEAT_INTERVAL_MS);
+		}
+
 		try {
 			const result = await executeJob(jobId, payload);
 
@@ -175,11 +179,11 @@ export class WorkerService {
 			const current = this.inFlight.get(jobId);
 			if (!current || current.token !== token) {
 				logger.warn({ jobId }, "Token superseded — discarding result");
+				if (current?.heartbeatTimer) clearInterval(current.heartbeatTimer);
 				this.inFlight.delete(jobId);
 				return;
 			}
 
-			// Store result for retry and send. inFlight cleaned up in handleAck.
 			current.result = result;
 			this.send({ type: MsgType.JobResult, jobId, token, result });
 			logger.info({ jobId }, "Job result sent — awaiting ack");
@@ -187,8 +191,7 @@ export class WorkerService {
 		} catch (err) {
 			const current = this.inFlight.get(jobId);
 			if (!current || current.token !== token) return;
-			// Failed jobs: clean up immediately; coordinator marks FAILED, reaper
-			// won't touch it. No retry for worker-side execution failures.
+			if (current.heartbeatTimer) clearInterval(current.heartbeatTimer);
 			this.inFlight.delete(jobId);
 			this.send({
 				type: MsgType.JobFailed,
@@ -200,8 +203,6 @@ export class WorkerService {
 		}
 	}
 
-	// ── Result retry (for dropped acks under chaos) ──────────────────────────
-
 	private scheduleResultRetry(jobId: string, token: string): void {
 		const job = this.inFlight.get(jobId);
 		if (!job) return;
@@ -211,6 +212,7 @@ export class WorkerService {
 				{ jobId, retries: MAX_RESULT_RETRIES },
 				"Max retries reached — giving up on job.result",
 			);
+			if (job.heartbeatTimer) clearInterval(job.heartbeatTimer);
 			this.inFlight.delete(jobId);
 			return;
 		}
@@ -232,8 +234,6 @@ export class WorkerService {
 			this.scheduleResultRetry(jobId, token);
 		}, RESULT_RETRY_DELAY_MS);
 	}
-
-	// ── Helpers ──────────────────────────────────────────────────────────────
 
 	private send(msg: WorkerToCoordMsg): void {
 		if (this.ws?.readyState === WebSocket.OPEN) {

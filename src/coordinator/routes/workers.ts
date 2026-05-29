@@ -27,7 +27,7 @@ export function createWorkersRouter(hub: WorkerHubService): Router {
 			200,
 			true,
 			"connected workers",
-			hub.getWorkerStats(),
+			{ workers: hub.getWorkerStats() },
 			ResponseCode.OK,
 		);
 	});
