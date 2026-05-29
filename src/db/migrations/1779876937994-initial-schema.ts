@@ -49,22 +49,24 @@ export class InitialSchema1779876937994 implements MigrationInterface {
 		`);
 
 		await queryRunner.query(`
-			CREATE TABLE "JobEvents" (
-				"EventID" BIGSERIAL   NOT NULL,
-				"JobID"   UUID,
-				"Event"   TEXT        NOT NULL,
-				"Ts"      TIMESTAMPTZ NOT NULL DEFAULT now(),
-				CONSTRAINT "PK_JobEvents" PRIMARY KEY ("EventID")
+			CREATE TABLE "JobTransitions" (
+				"TransitionID" BIGSERIAL NOT NULL,
+				"JobID"        UUID      NOT NULL,
+				"FromStatus"   TEXT      NOT NULL,
+				"ToStatus"     TEXT      NOT NULL,
+				"AtMs"         BIGINT    NOT NULL,
+				"CoordinatorId" TEXT     NOT NULL,
+				CONSTRAINT "PK_JobTransitions" PRIMARY KEY ("TransitionID")
 			)
 		`);
 		await queryRunner.query(
-			`CREATE INDEX "IX_JobEvents_Ts" ON "JobEvents" ("Ts")`,
+			`CREATE INDEX "IX_JobTransitions_JobID" ON "JobTransitions" ("JobID")`,
 		);
 	}
 
 	async down(queryRunner: QueryRunner): Promise<void> {
-		await queryRunner.query(`DROP INDEX "IX_JobEvents_Ts"`);
-		await queryRunner.query(`DROP TABLE "JobEvents"`);
+		await queryRunner.query(`DROP INDEX "IX_JobTransitions_JobID"`);
+		await queryRunner.query(`DROP TABLE "JobTransitions"`);
 		await queryRunner.query(`DROP TABLE "WorkerReg"`);
 		await queryRunner.query(`DROP INDEX "IX_Leases_ExpiresAt"`);
 		await queryRunner.query(`DROP TABLE "Leases"`);
