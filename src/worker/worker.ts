@@ -160,6 +160,7 @@ export class WorkerService {
 				jobId,
 				token,
 				error: "worker at capacity",
+				temporary: true, // coordinator must re-queue, not permanently fail
 			});
 			return;
 		}
