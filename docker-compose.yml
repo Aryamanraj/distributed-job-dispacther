@@ -31,8 +31,6 @@ services:
       POSTGRES_PASSWORD: postgres
     volumes:
       - pgdata:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d dispatcher"]
       interval: 5s
@@ -111,7 +109,7 @@ services:
       LOG_LEVEL: info
       WORKER_ID: worker-1
       COORDINATOR_URL: ws://nginx/ws
-      CONCURRENCY_LIMIT: "4"
+      CONCURRENCY_LIMIT: "16"
       RECONNECT_DELAY_MS: "2000"
 
   worker-2:
@@ -126,7 +124,7 @@ services:
       LOG_LEVEL: info
       WORKER_ID: worker-2
       COORDINATOR_URL: ws://nginx/ws
-      CONCURRENCY_LIMIT: "4"
+      CONCURRENCY_LIMIT: "16"
       RECONNECT_DELAY_MS: "2000"
 
   worker-3:
@@ -141,7 +139,7 @@ services:
       LOG_LEVEL: info
       WORKER_ID: worker-3
       COORDINATOR_URL: ws://nginx/ws
-      CONCURRENCY_LIMIT: "4"
+      CONCURRENCY_LIMIT: "16"
       RECONNECT_DELAY_MS: "2000"
 
   worker-4:
@@ -156,7 +154,7 @@ services:
       LOG_LEVEL: info
       WORKER_ID: worker-4
       COORDINATOR_URL: ws://nginx/ws
-      CONCURRENCY_LIMIT: "4"
+      CONCURRENCY_LIMIT: "16"
       RECONNECT_DELAY_MS: "2000"
 
   worker-5:
@@ -171,7 +169,7 @@ services:
       LOG_LEVEL: info
       WORKER_ID: worker-5
       COORDINATOR_URL: ws://nginx/ws
-      CONCURRENCY_LIMIT: "4"
+      CONCURRENCY_LIMIT: "16"
       RECONNECT_DELAY_MS: "2000"
 
 volumes:

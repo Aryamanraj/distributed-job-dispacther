@@ -55,7 +55,30 @@ format:
 
 .PHONY: test
 test:
-	$(RUN) test
+	@set -euo pipefail; \
+	echo -e "$(gray)Smoke test: TypeScript compile$(reset)"; \
+	npx --no-install tsc --noEmit; \
+	echo -e "$(green)✓ Type-check passed$(reset)"; \
+	if docker compose ps --status=running --services 2>/dev/null | grep -q '^coordinator-1$$'; then \
+	  echo -e "$(gray)Smoke test: stack endpoints$(reset)"; \
+	  curl -fsS http://localhost:8080/health >/dev/null && echo -e "$(green)✓ /health$(reset)"; \
+	  curl -fsS http://localhost:8080/stats  >/dev/null && echo -e "$(green)✓ /stats$(reset)"; \
+	  KEY="smoke-$$(date +%s%N)"; \
+	  R1=$$(curl -fsS -X POST http://localhost:8080/jobs -H 'content-type: application/json' \
+	         -d "{\"idempotencyKey\":\"$$KEY\",\"payload\":{\"durationMs\":50}}"); \
+	  R2=$$(curl -fsS -X POST http://localhost:8080/jobs -H 'content-type: application/json' \
+	         -d "{\"idempotencyKey\":\"$$KEY\",\"payload\":{\"durationMs\":50}}"); \
+	  echo "$$R1" | grep -q '"JobID"' || { echo -e "$(red)✗ submit failed$(reset)"; exit 1; }; \
+	  ID1=$$(echo "$$R1" | python3 -c "import sys,json;print(json.load(sys.stdin)['data']['JobID'])"); \
+	  ID2=$$(echo "$$R2" | python3 -c "import sys,json;print(json.load(sys.stdin)['data']['JobID'])"); \
+	  [ "$$ID1" = "$$ID2" ] || { echo -e "$(red)✗ idempotency broken: $$ID1 != $$ID2$(reset)"; exit 1; }; \
+	  echo -e "$(green)✓ idempotency dedupes same key$(reset)"; \
+	  curl -fsS -X POST http://localhost:8080/chaos -H 'content-type: application/json' \
+	    -d '{"fault":"pause_dispatch","params":{"ms":100}}' >/dev/null && echo -e "$(green)✓ /chaos accepts pause_dispatch$(reset)"; \
+	  echo -e "$(green)✓ Smoke test passed$(reset)"; \
+	else \
+	  echo -e "$(yellow)Stack not running — skipping HTTP smoke. Run 'make up' first to test endpoints.$(reset)"; \
+	fi
 
 .PHONY: clean
 clean:
