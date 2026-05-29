@@ -65,12 +65,12 @@ test:
 	  curl -fsS http://localhost:8080/stats  >/dev/null && echo -e "$(green)✓ /stats$(reset)"; \
 	  KEY="smoke-$$(date +%s%N)"; \
 	  R1=$$(curl -fsS -X POST http://localhost:8080/jobs -H 'content-type: application/json' \
-	         -d "{\"idempotencyKey\":\"$$KEY\",\"payload\":{\"durationMs\":50}}"); \
+	         -d "{\"idempotency_key\":\"$$KEY\",\"payload\":{\"durationMs\":50}}"); \
 	  R2=$$(curl -fsS -X POST http://localhost:8080/jobs -H 'content-type: application/json' \
-	         -d "{\"idempotencyKey\":\"$$KEY\",\"payload\":{\"durationMs\":50}}"); \
-	  echo "$$R1" | grep -q '"JobID"' || { echo -e "$(red)✗ submit failed$(reset)"; exit 1; }; \
-	  ID1=$$(echo "$$R1" | python3 -c "import sys,json;print(json.load(sys.stdin)['data']['JobID'])"); \
-	  ID2=$$(echo "$$R2" | python3 -c "import sys,json;print(json.load(sys.stdin)['data']['JobID'])"); \
+	         -d "{\"idempotency_key\":\"$$KEY\",\"payload\":{\"durationMs\":50}}"); \
+	  echo "$$R1" | grep -q '"job_id"' || { echo -e "$(red)✗ submit failed$(reset)"; exit 1; }; \
+	  ID1=$$(echo "$$R1" | python3 -c "import sys,json;print(json.load(sys.stdin)['job_id'])"); \
+	  ID2=$$(echo "$$R2" | python3 -c "import sys,json;print(json.load(sys.stdin)['job_id'])"); \
 	  [ "$$ID1" = "$$ID2" ] || { echo -e "$(red)✗ idempotency broken: $$ID1 != $$ID2$(reset)"; exit 1; }; \
 	  echo -e "$(green)✓ idempotency dedupes same key$(reset)"; \
 	  curl -fsS -X POST http://localhost:8080/chaos -H 'content-type: application/json' \
@@ -97,10 +97,31 @@ down:
 logs:
 	docker compose logs -f --tail=100
 
+.PHONY: setup_hosts
+setup_hosts:
+	@echo "Adding /etc/hosts entries so the chaos faulter can reach c1/c2/c3 directly…"
+	@grep -qF "127.0.0.2 c1" /etc/hosts || echo "127.0.0.2 c1" | sudo tee -a /etc/hosts
+	@grep -qF "127.0.0.3 c2" /etc/hosts || echo "127.0.0.3 c2" | sudo tee -a /etc/hosts
+	@grep -qF "127.0.0.4 c3" /etc/hosts || echo "127.0.0.4 c3" | sudo tee -a /etc/hosts
+	@echo "Done — c1→127.0.0.2  c2→127.0.0.3  c3→127.0.0.4"
+
 .PHONY: chaos
-chaos:
+chaos: setup_hosts
 	@if [ ! -f chaos_harness.py ]; then echo "chaos_harness.py not found — place it in the repo root"; exit 1; fi
-	python3 chaos_harness.py 2>&1 | tee chaos_report.txt
+	@command -v python3 >/dev/null 2>&1 || { echo "python3 not found — install it (apt install python3 / brew install python)"; exit 1; }
+	@command -v pip3 >/dev/null 2>&1 || command -v python3 -m pip >/dev/null 2>&1 || { echo "pip3 not found — install it (apt install python3-pip)"; exit 1; }
+	@command -v docker >/dev/null 2>&1 || { echo "docker not found — the harness uses 'docker kill' directly"; exit 1; }
+	@python3 -c "import aiohttp" 2>/dev/null || \
+		pip3 install --quiet aiohttp --break-system-packages 2>/dev/null || \
+		pip3 install --quiet aiohttp || \
+		python3 -m pip install --quiet aiohttp
+	python3 chaos_harness.py \
+		--base http://localhost:8080 \
+		--coords c1,c2,c3 \
+		--workers w1,w2,w3,w4,w5 \
+		--duration 600 \
+		--rate 50 \
+		--report chaos_report.txt
 
 .PHONY: commit
 commit: precommit-checks do-commit
