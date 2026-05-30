@@ -20,6 +20,7 @@ help:
 	@echo "  make check            Biome lint + format check"
 	@echo "  make format           Biome format (write)"
 	@echo "  make test             Run tests"
+	@echo "  make test-integration Run integration tests (testcontainers Postgres)"
 	@echo "  make clean            Remove dist/ and node_modules/"
 	@echo "  make commit           Interactive conventional commit"
 	@echo -e "$(green)Docker$(reset)"
@@ -62,6 +63,13 @@ test:
 	echo -e "$(gray)Unit tests: vitest$(reset)"; \
 	$(RUN) test; \
 	echo -e "$(green)✓ Unit tests passed$(reset)"; \
+	if command -v docker >/dev/null 2>&1; then \
+	  echo -e "$(gray)Integration tests: vitest + testcontainers Postgres$(reset)"; \
+	  $(RUN) test:integration; \
+	  echo -e "$(green)✓ Integration tests passed$(reset)"; \
+	else \
+	  echo -e "$(yellow)docker not found — skipping integration tests (testcontainers requires docker)$(reset)"; \
+	fi; \
 	if docker compose ps --status=running --services 2>/dev/null | grep -q '^coordinator-1$$'; then \
 	  echo -e "$(gray)Smoke test: stack endpoints$(reset)"; \
 	  curl -fsS http://localhost:8080/health >/dev/null && echo -e "$(green)✓ /health$(reset)"; \
@@ -86,6 +94,13 @@ test:
 .PHONY: clean
 clean:
 	@rm -rf dist node_modules
+
+.PHONY: test-integration
+test-integration:
+	@command -v docker >/dev/null 2>&1 || { echo -e "$(red)docker not found — required for testcontainers$(reset)"; exit 1; }
+	@echo -e "$(gray)Integration tests: vitest + testcontainers Postgres$(reset)"
+	$(RUN) test:integration
+	@echo -e "$(green)✓ Integration tests passed$(reset)"
 
 # Docker stack
 .PHONY: up

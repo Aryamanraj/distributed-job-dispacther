@@ -1,11 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { JOB_STATUS_ENUM } from "../job-status";
 
-/**
- * These string values are persisted in the database and emitted in API
- * responses. Renaming them is a wire-breaking change — this test exists to
- * catch accidental renames during refactors.
- */
 describe("JOB_STATUS_ENUM wire values", () => {
 	it("PENDING is 'pending'", () => {
 		expect(JOB_STATUS_ENUM.PENDING).toBe("pending");
