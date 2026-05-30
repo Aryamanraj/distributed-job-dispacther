@@ -9,7 +9,8 @@
 		"build": "tsc",
 		"check": "biome check .",
 		"format": "biome format --write .",
-		"test": "echo \"No tests yet\" && exit 0",
+		"test": "vitest run",
+		"test:watch": "vitest",
 		"coordinator:dev": "ts-node src/coordinator/index.ts",
 		"migrate": "ts-node src/migrate.ts"
 	},
@@ -37,6 +38,7 @@
 		"@types/uuid": "^10.0.0",
 		"@types/ws": "^8.18.1",
 		"ts-node": "^10.9.2",
-		"typescript": "^6.0.3"
+		"typescript": "^6.0.3",
+		"vitest": "^4.1.7"
 	}
 }

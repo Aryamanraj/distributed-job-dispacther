@@ -59,6 +59,9 @@ test:
 	echo -e "$(gray)Smoke test: TypeScript compile$(reset)"; \
 	npx --no-install tsc --noEmit; \
 	echo -e "$(green)✓ Type-check passed$(reset)"; \
+	echo -e "$(gray)Unit tests: vitest$(reset)"; \
+	$(RUN) test; \
+	echo -e "$(green)✓ Unit tests passed$(reset)"; \
 	if docker compose ps --status=running --services 2>/dev/null | grep -q '^coordinator-1$$'; then \
 	  echo -e "$(gray)Smoke test: stack endpoints$(reset)"; \
 	  curl -fsS http://localhost:8080/health >/dev/null && echo -e "$(green)✓ /health$(reset)"; \

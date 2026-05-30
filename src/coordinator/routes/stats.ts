@@ -14,7 +14,7 @@ const WORKER_ALIVE_MS = 90_000;
 // Must match LEASE_TTL_MS in dispatch.service.ts
 const LEASE_TTL_MS = 60_000;
 
-function formatUptime(ms: number): string {
+export function formatUptime(ms: number): string {
 	const s = Math.floor(ms / 1000);
 	const m = Math.floor(s / 60);
 	const h = Math.floor(m / 60);
