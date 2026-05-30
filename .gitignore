@@ -5,6 +5,5 @@ logs/
 docs/
 
 # chaos harness output
-chaos_report.txt
 __pycache__/
 *.pyc

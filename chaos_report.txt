@@ -1,0 +1,33 @@
+FarLabs Chaos Harness — Run Report
+============================================================
+wall_time:                  652.9s
+seed:                       1729
+submitted (ok):             28852
+submitted (failed):         5
+duplicate submissions:      1527
+jobs tracked:               27326
+jobs with accepted commit:  27326
+jobs audit-unreachable:     0
+unique idempotency keys:    27326
+
+Submit latency:
+  p50: 4.0ms   p95: 5.7ms   p99: 7.1ms
+
+Chaos events:
+  worker kills attempted:   see below
+  workers killed:           17
+  coordinators killed:      6
+  faults injected:          29
+    clock_skew: 9
+    drop_acks: 7
+    partition_db: 6
+    pause_dispatch: 7
+
+Invariant violations: 0
+------------------------------------------------------------
+(none)
+
+Verdict:
+  PASS — system survived chaos with no observable invariant violations.
+
+Event log written to: chaos_events.jsonl
